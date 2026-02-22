@@ -1,0 +1,90 @@
+# Latent Generation Experiment Configuration
+# Defines coarse-to-fine latent layer structure and validation constraints
+
+# ── Weights & Biases ─────────────────────────────────────────────────────
+# API key is loaded from .env (WANDB_API_KEY).  Set enabled: true to log.
+wandb:
+  enabled: false                     # flip to true when ready to log
+  project: "coarse-to-fine"
+  entity: null                       # uses WANDB_ENTITY from .env or W&B default
+  group: "latent-generation"         # groups related runs together
+  tags: ["qwen3-4b"]
+  mode: "online"                     # "online", "offline", or "disabled"
+
+# ── Model architecture (matches C2FConfig) ───────────────────────────────
+scale_lengths: [2, 4, 8, 16, 32]  # [z_4, z_3, z_2, z_1, text_scale]
+
+# Word count constraints for verification (exact counts)
+# These correspond to the latent layers (not including the final text scale)
+word_count_constraints:
+  z_4: 2   # Coarsest layer - 2 words
+  z_3: 4   # Second layer - 4 words
+  z_2: 8   # Third layer - 8 words
+  z_1: 16  # Finest layer - 16 words
+
+# Text scale word count (the original document)
+text_word_count: 32
+
+# Verification settings
+verification:
+  strict_word_count: true  # Require exact word count match
+  allow_extra_whitespace: true  # Normalize whitespace when counting
+  check_layer_order: true  # Ensure z_4, z_3, z_2, z_1 order
+
+# Dataset output settings
+dataset:
+  output_dir: "data/verified/latent_generation_10k_v1"
+
+# SFT with veRL (Supervised Fine-Tuning)
+sft:
+  model: "Qwen/Qwen3-4B"  # Base model; change to use a different model
+  num_gpus: 1  # 1, 2, 3, or 4 GPUs per node
+  dataset_dir: "data/sft_dataset"
+  checkpoint_dir: "checkpoints/sft"
+  prompt_data: "data/prompt_data/gpt-5-nano-2025-08-07/docs_0000010000/gemini-3-pro-7/latent-generation/sft.jsonl"
+  # Optional training overrides (used by 04_sft_train when building veRL config)
+  max_prompt_length: 512
+  max_response_length: 512
+  train_batch_size: 32
+  epochs: 3
+  lr: 1.0e-5
+
+# Step 5: Local generation with vLLM
+generation:
+  model_path: "checkpoints/sft"  # SFT checkpoint path or HF model name
+  prompt_dataset: "data/sft_dataset/train.parquet"  # Parquet with prompt column
+  output_dir: "data/local_generations"
+  num_gpus: 1  # vLLM tensor parallelism (1-4)
+  max_tokens: 256
+  temperature: 0.7
+  top_p: 0.9
+  top_k: -1  # -1 = disabled
+  repetition_penalty: 1.0
+  seed: 42
+  verify_outputs: true  # Run RuleBasedVerifier on outputs
+
+# Step 6: C2F joint model pretraining
+c2f_training:
+  init_from: "checkpoints/sft"  # SFT checkpoint, base model name, or "random"
+  dataset_dir: "data/local_generations"  # Directory with c2f_train.parquet
+  checkpoint_dir: "checkpoints/decoder"
+  num_gpus: 1  # 1-4 GPUs via FSDP
+  per_device_batch_size: 8
+  gradient_accumulation_steps: 4
+  epochs: 10
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  max_grad_norm: 1.0
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  eval_split: 0.05  # Fraction of data for validation
+  fsdp: "full_shard"  # "full_shard", "shard_grad_op", or "" for DDP
+  fsdp_config:
+    backward_prefetch: "backward_pre"
+    forward_prefetch: true
+  report_to: "none"  # "wandb" or "none"
+  run_name: "c2f-pretrain"
+  seed: 42

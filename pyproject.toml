@@ -1,0 +1,26 @@
+[project]
+name = "coarse-to-fine"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets>=4.5.0",
+    "pydantic>=2.12.5",
+    "pyyaml>=6.0.3",
+]
+
+[project.optional-dependencies]
+# SFT with veRL: pip install -e ".[sft]" (requires CUDA and veRL-compatible env)
+sft = [
+    "verl>=0.7.0",
+]
+# Step 5: Local generation with vLLM
+generation = [
+    "vllm>=0.8.0",
+]
+# Step 6: C2F model pretraining with HF Trainer + FSDP
+c2f = [
+    "transformers>=4.52.0",
+    "accelerate>=1.7.0",
+    "torch>=2.6.0",
+    "wandb",
+]
