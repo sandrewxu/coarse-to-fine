@@ -13,7 +13,14 @@ build/
 .venv/
 
 # Data artifacts (large files — track with git-lfs or DVC if needed)
-data/
+data/batch_outputs/
+data/verified/
+data/sft_dataset/
+data/local_generations/
+data/decoder_dataset/
+data/shards/
+data/prompt_data/
+data/raw/
 
 # Model checkpoints
 checkpoints/
