@@ -20,9 +20,24 @@ from transformers.models.qwen3.modeling_qwen3 import (
     eager_attention_forward,
 )
 from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs, auto_docstring
-from transformers.utils.generic import merge_with_config_defaults
-from transformers.utils.output_capturing import capture_outputs
+
+# Compat: these decorators/types were added in transformers 4.52; provide
+# no-op fallbacks so the model works with 4.51 (shipped by verl / vllm).
+try:
+    from transformers.utils import TransformersKwargs, auto_docstring
+except ImportError:
+    TransformersKwargs = FlashAttentionKwargs
+    auto_docstring = lambda fn: fn
+
+try:
+    from transformers.utils.generic import merge_with_config_defaults
+except ImportError:
+    merge_with_config_defaults = lambda fn: fn
+
+try:
+    from transformers.utils.output_capturing import capture_outputs
+except ImportError:
+    capture_outputs = lambda fn: fn
 
 def create_c2f_block_causal_mask(
     config,
@@ -215,7 +230,6 @@ class C2FModel(Qwen3Model):
 
     @merge_with_config_defaults
     @capture_outputs
-    @auto_docstring
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
