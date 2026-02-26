@@ -72,6 +72,8 @@ c2f_training:
   init_from: "random"  # SFT checkpoint, base model name, or "random"
   dataset_dir: "data/sft_dataset"  # Directory with training parquet
   dataset_format: "sft"  # "c2f" for flat text (c2f_train.parquet), "sft" for prompt+response (train.parquet)
+  tokenizer: "space"  # "space" = word-level (1 word = 1 token), "model" = BPE from init_from
+  tokenizer_dir: "checkpoints/decoder/tokenizer"  # where the space tokenizer is saved / loaded
   checkpoint_dir: "checkpoints/decoder"
   num_gpus: 1  # 1-4 GPUs via FSDP
   per_device_batch_size: 8

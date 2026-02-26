@@ -17,7 +17,9 @@ from src.qwen3_joint.modeling import C2FForCausalLM
 SCALE_NAMES = ["z_4", "z_3", "z_2", "z_1", "text"]
 
 
-def load_c2f_model(config: dict[str, Any]) -> C2FForCausalLM:
+def load_c2f_model(
+    config: dict[str, Any], *, vocab_size: int | None = None
+) -> C2FForCausalLM:
     """
     Load and initialize C2FForCausalLM.
 
@@ -29,6 +31,9 @@ def load_c2f_model(config: dict[str, Any]) -> C2FForCausalLM:
 
     Args:
         config: Full experiment config with 'c2f_training' and 'scale_lengths'.
+        vocab_size: Override vocabulary size (e.g. from a space-based tokenizer).
+            Only used for ``"random"`` init; for checkpoint init the source
+            model's vocab size is used (and embedding is resized if needed).
 
     Returns:
         Initialized C2FForCausalLM model.
@@ -38,7 +43,10 @@ def load_c2f_model(config: dict[str, Any]) -> C2FForCausalLM:
     scale_lengths = config["scale_lengths"]
 
     if init_from == "random":
-        model_config = C2FConfig(scale_lengths=scale_lengths)
+        extra_kwargs = {}
+        if vocab_size is not None:
+            extra_kwargs["vocab_size"] = vocab_size
+        model_config = C2FConfig(scale_lengths=scale_lengths, **extra_kwargs)
         return C2FForCausalLM(model_config)
 
     # Load source config and create C2F config from it

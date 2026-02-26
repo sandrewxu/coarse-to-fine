@@ -22,7 +22,7 @@ from pathlib import Path
 import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset as TorchDataset
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 _LAYER_PATTERN = re.compile(r"^z_\d+:\s*(.*)$")
 
@@ -53,17 +53,19 @@ class C2FDataset(TorchDataset):
     def __init__(
         self,
         data_dir: str | Path,
-        tokenizer_name_or_path: str,
-        scale_lengths: list[int],
-        word_count_constraints: dict[str, int],
+        tokenizer_name_or_path: str = "",
+        scale_lengths: list[int] = None,
+        word_count_constraints: dict[str, int] = None,
         text_word_count: int = 32,
         parquet_filename: str | None = None,
         dataset_format: str = "c2f",
+        tokenizer: PreTrainedTokenizerBase | None = None,
     ):
         """
         Args:
             data_dir: Directory containing the training parquet.
             tokenizer_name_or_path: HF tokenizer name or local checkpoint path.
+                Ignored when ``tokenizer`` is provided.
             scale_lengths: Token positions per scale, e.g. [2, 4, 8, 16, 32].
             word_count_constraints: Dict like {"z_4": 2, "z_3": 4, "z_2": 8, "z_1": 16}.
             text_word_count: Number of words in the text scale (original document).
@@ -72,6 +74,10 @@ class C2FDataset(TorchDataset):
                 ``"train.parquet"`` for ``"sft"`` format.
             dataset_format: ``"c2f"`` for flat text column, ``"sft"`` for
                 prompt+response columns (veRL format).
+            tokenizer: Optional pre-built tokenizer.  When provided,
+                ``tokenizer_name_or_path`` is ignored.  Use this to pass a
+                space-based tokenizer trained by
+                :func:`src.c2f_training.tokenizer.load_or_train_space_tokenizer`.
         """
         if dataset_format not in self.VALID_FORMATS:
             raise ValueError(
@@ -79,9 +85,12 @@ class C2FDataset(TorchDataset):
             )
 
         self.dataset_format = dataset_format
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name_or_path, trust_remote_code=True
-        )
+        if tokenizer is not None:
+            self.tokenizer = tokenizer
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name_or_path, trust_remote_code=True
+            )
         self.scale_lengths = scale_lengths
         self.seq_len = 2 ** math.ceil(math.log2(1 + sum(scale_lengths)))
 

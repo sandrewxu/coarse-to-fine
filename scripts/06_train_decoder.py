@@ -6,9 +6,15 @@ Reads config from config/experiments/latent_generation.yaml (c2f_training sectio
 loads training data (either flattened c2f_train.parquet or SFT train.parquet),
 tokenizes into C2F format, and trains with HuggingFace Trainer + FSDP.
 
+Tokenizer modes (set ``tokenizer`` in c2f_training config):
+  - "space" (default): Train/load a word-level tokenizer where each
+    space-separated word is exactly one token.  Guarantees perfect alignment
+    between word count constraints and token positions.
+  - "model": Use the BPE tokenizer from the init_from model checkpoint.
+
 W&B integration (enabled via ``wandb.enabled: true`` in config):
   - Logs full experiment config as run metadata for run comparison
-  - Logs dataset / model summary (size, param count, init source)
+  - Logs dataset / model summary (size, param count, init source, vocab size)
   - Logs per-scale training loss (loss_z_4, loss_z_3, loss_z_2, loss_z_1, loss_text)
   - Standard HF Trainer metrics (loss, eval_loss, learning_rate, etc.)
 
@@ -120,6 +126,32 @@ def main() -> int:
     from src.c2f_training.dataset import C2FDataset
     from src.c2f_training.train import C2FTrainer, build_training_args, load_c2f_model
 
+    # ── Tokenizer ───────────────────────────────────────────────────────────
+    tokenizer_type = c2f_config.get("tokenizer", "space")
+    tokenizer = None
+    vocab_size = None
+
+    if tokenizer_type == "space":
+        from src.c2f_training.tokenizer import load_or_train_space_tokenizer
+
+        tokenizer_dir = Path(
+            c2f_config.get("tokenizer_dir", "checkpoints/decoder/tokenizer")
+        )
+        if not tokenizer_dir.is_absolute():
+            tokenizer_dir = PROJECT_ROOT / tokenizer_dir
+
+        tokenizer = load_or_train_space_tokenizer(
+            tokenizer_dir=tokenizer_dir,
+            data_dir=dataset_dir,
+            dataset_format=dataset_format,
+            parquet_filename=parquet_filename,
+        )
+        vocab_size = tokenizer.vocab_size
+        print(f"  Space tokenizer ready (vocab_size={vocab_size})")
+    else:
+        # "model": use the tokenizer that ships with init_from checkpoint
+        print("Using model BPE tokenizer")
+
     # ── Initialize W&B run (main process only) ──────────────────────────────
     # Manual init so the full experiment config is logged as run metadata.
     # HF Trainer's WandbCallback reuses this run instead of creating a new one.
@@ -136,12 +168,14 @@ def main() -> int:
                 "word_count_constraints": config.get("word_count_constraints"),
                 "text_word_count": config.get("text_word_count", 32),
                 "dataset_format": dataset_format,
+                "tokenizer": tokenizer_type,
+                "vocab_size": vocab_size,
             },
         )
 
-    # 1. Load model
+    # 1. Load model (pass vocab_size so random-init uses the right embedding size)
     print("Loading C2F model...")
-    model = load_c2f_model(config)
+    model = load_c2f_model(config, vocab_size=vocab_size)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"  Model parameters: {param_count:,}")
 
@@ -156,6 +190,7 @@ def main() -> int:
         text_word_count=config.get("text_word_count", 32),
         parquet_filename=parquet_filename,
         dataset_format=dataset_format,
+        tokenizer=tokenizer,
     )
     print(f"  Dataset size: {len(full_dataset)}")
 
@@ -174,10 +209,12 @@ def main() -> int:
             "model/param_count": param_count,
             "model/init_from": c2f_config.get("init_from", "random"),
             "model/seq_len": full_dataset.seq_len,
+            "model/vocab_size": vocab_size or "model-default",
             "dataset/total_size": len(full_dataset),
             "dataset/train_size": train_size,
             "dataset/eval_size": eval_size,
             "dataset/format": dataset_format,
+            "tokenizer/type": tokenizer_type,
         })
 
     # 4. Build training args (W&B flag controls report_to)
