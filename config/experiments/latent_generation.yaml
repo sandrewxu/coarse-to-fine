@@ -70,7 +70,8 @@ generation:
 # Step 6: C2F joint model pretraining
 c2f_training:
   init_from: "checkpoints/sft"  # SFT checkpoint, base model name, or "random"
-  dataset_dir: "data/local_generations"  # Directory with c2f_train.parquet
+  dataset_dir: "data/sft_dataset"  # Directory with training parquet
+  dataset_format: "sft"  # "c2f" for flat text (c2f_train.parquet), "sft" for prompt+response (train.parquet)
   checkpoint_dir: "checkpoints/decoder"
   num_gpus: 1  # 1-4 GPUs via FSDP
   per_device_batch_size: 8

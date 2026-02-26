@@ -3,8 +3,18 @@
 Pretrain the C2F (Coarse-to-Fine) joint model.
 
 Reads config from config/experiments/latent_generation.yaml (c2f_training section),
-loads step 5 generation outputs (flattened c2f_train.parquet), tokenizes into C2F
-format, and trains with HuggingFace Trainer + FSDP.
+loads training data (either flattened c2f_train.parquet or SFT train.parquet),
+tokenizes into C2F format, and trains with HuggingFace Trainer + FSDP.
+
+W&B integration (enabled via ``wandb.enabled: true`` in config):
+  - Logs full experiment config as run metadata for run comparison
+  - Logs dataset / model summary (size, param count, init source)
+  - Logs per-scale training loss (loss_z_4, loss_z_3, loss_z_2, loss_z_1, loss_text)
+  - Standard HF Trainer metrics (loss, eval_loss, learning_rate, etc.)
+
+Supports two dataset formats (set ``dataset_format`` in config):
+  - "c2f":  flat word sequences from step 5 (c2f_train.parquet)
+  - "sft":  prompt+response from step 3 (train.parquet, veRL format)
 
 Usage:
     # Single GPU:
@@ -22,6 +32,7 @@ Usage:
 Requires: pip install -e ".[c2f]" and a CUDA-capable environment.
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -35,6 +46,11 @@ def load_config(config_path: Path) -> dict:
     """Load YAML config."""
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
+
+def _is_main_process() -> bool:
+    """Check if this is the main process (rank 0) in distributed training."""
+    return os.environ.get("LOCAL_RANK", "0") == "0"
 
 
 def main() -> int:
@@ -74,39 +90,72 @@ def main() -> int:
 
     c2f_config = config["c2f_training"]
 
-    # Resolve dataset directory
+    # Resolve dataset directory and format
+    dataset_format = c2f_config.get("dataset_format", "c2f")
     dataset_dir = Path(c2f_config.get("dataset_dir", "data/local_generations"))
     if not dataset_dir.is_absolute():
         dataset_dir = PROJECT_ROOT / dataset_dir
 
-    c2f_parquet = dataset_dir / "c2f_train.parquet"
-    if not c2f_parquet.exists():
-        print(f"Error: C2F training data not found: {c2f_parquet}", file=sys.stderr)
-        print(
-            "Run step 5 (05_generate_local.py) first to create the flattened training data.",
-            file=sys.stderr,
-        )
+    # Determine expected parquet filename based on format
+    default_parquet = (
+        "c2f_train.parquet" if dataset_format == "c2f" else "train.parquet"
+    )
+    parquet_filename = c2f_config.get("parquet_filename", default_parquet)
+    parquet_path = dataset_dir / parquet_filename
+
+    if not parquet_path.exists():
+        print(f"Error: Training data not found: {parquet_path}", file=sys.stderr)
+        if dataset_format == "c2f":
+            print(
+                "Run step 5 (05_generate_local.py) first to create the flattened training data.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Run step 3 (03_verify_outputs.py) first to create the SFT dataset.",
+                file=sys.stderr,
+            )
         return 1
 
-    from transformers import Trainer
-
     from src.c2f_training.dataset import C2FDataset
-    from src.c2f_training.train import build_training_args, load_c2f_model
+    from src.c2f_training.train import C2FTrainer, build_training_args, load_c2f_model
+
+    # ── Initialize W&B run (main process only) ──────────────────────────────
+    # Manual init so the full experiment config is logged as run metadata.
+    # HF Trainer's WandbCallback reuses this run instead of creating a new one.
+    wandb_run = None
+    if wandb_enabled and _is_main_process():
+        import wandb
+
+        wandb_run = wandb.init(
+            name=c2f_config.get("run_name", "c2f-pretrain"),
+            config={
+                "step": "06-c2f-pretrain",
+                "c2f_training": c2f_config,
+                "scale_lengths": config.get("scale_lengths"),
+                "word_count_constraints": config.get("word_count_constraints"),
+                "text_word_count": config.get("text_word_count", 32),
+                "dataset_format": dataset_format,
+            },
+        )
 
     # 1. Load model
     print("Loading C2F model...")
     model = load_c2f_model(config)
-    print(f"  Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"  Model parameters: {param_count:,}")
 
     # 2. Build dataset
     tokenizer_source = c2f_config.get("init_from", "Qwen/Qwen3-4B")
-    print(f"Building C2F dataset from {c2f_parquet}...")
+    print(f"Building C2F dataset from {parquet_path} (format={dataset_format})...")
     full_dataset = C2FDataset(
         data_dir=str(dataset_dir),
         tokenizer_name_or_path=tokenizer_source,
         scale_lengths=config["scale_lengths"],
         word_count_constraints=config["word_count_constraints"],
         text_word_count=config.get("text_word_count", 32),
+        parquet_filename=parquet_filename,
+        dataset_format=dataset_format,
     )
     print(f"  Dataset size: {len(full_dataset)}")
 
@@ -115,17 +164,32 @@ def main() -> int:
     splits = full_dataset.train_test_split(
         test_size=eval_split, seed=c2f_config.get("seed", 42)
     )
-    print(f"  Train: {len(splits['train'])}, Eval: {len(splits['test'])}")
+    train_size = len(splits["train"])
+    eval_size = len(splits["test"])
+    print(f"  Train: {train_size}, Eval: {eval_size}")
+
+    # ── Log dataset / model metadata to W&B ─────────────────────────────────
+    if wandb_run is not None:
+        wandb_run.summary.update({
+            "model/param_count": param_count,
+            "model/init_from": c2f_config.get("init_from", "random"),
+            "model/seq_len": full_dataset.seq_len,
+            "dataset/total_size": len(full_dataset),
+            "dataset/train_size": train_size,
+            "dataset/eval_size": eval_size,
+            "dataset/format": dataset_format,
+        })
 
     # 4. Build training args (W&B flag controls report_to)
     training_args = build_training_args(config, PROJECT_ROOT, wandb_enabled=wandb_enabled)
 
-    # 5. Create Trainer
-    trainer = Trainer(
+    # 5. Create C2FTrainer (extends Trainer with per-scale loss logging)
+    trainer = C2FTrainer(
         model=model,
         args=training_args,
         train_dataset=splits["train"],
         eval_dataset=splits["test"],
+        scale_lengths=config["scale_lengths"],
     )
 
     # 6. Train
@@ -135,6 +199,9 @@ def main() -> int:
     # 7. Save final model
     trainer.save_model()
     print(f"Model saved to: {training_args.output_dir}")
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
     return 0
 

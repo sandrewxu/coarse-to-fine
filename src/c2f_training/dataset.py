@@ -1,14 +1,22 @@
 """
-C2F tokenization pipeline: converts flattened latent+text sequences into
+C2F tokenization pipeline: converts latent+text sequences into
 fixed-layout token tensors for the Coarse-to-Fine model.
 
-Input:  c2f_train.parquet with a single 'text' column containing flat word
-        sequences (latent words + prompt words concatenated).
+Supports two input formats controlled by ``dataset_format``:
+
+- ``"c2f"`` (default): A single ``text`` column containing flat word sequences
+  (latent words + prompt words concatenated).  Produced by ``flatten_for_c2f``
+  in step 5.
+
+- ``"sft"``: Two columns — ``prompt`` (original 32-word text) and ``response``
+  (raw ``z_n:`` format latent layers).  This is the veRL-compatible SFT parquet
+  from step 3.  The dataset parses z_n labels and flattens on the fly.
 
 Output: PyTorch tensors with layout [BOS | scale_0 | scale_1 | ... | padding],
         where each scale occupies exactly scale_lengths[k] token positions.
 """
 import math
+import re
 from pathlib import Path
 
 import torch
@@ -16,11 +24,20 @@ from datasets import load_dataset
 from torch.utils.data import Dataset as TorchDataset
 from transformers import AutoTokenizer
 
+_LAYER_PATTERN = re.compile(r"^z_\d+:\s*(.*)$")
+
 
 class C2FDataset(TorchDataset):
     """
-    Dataset that splits flat word sequences by scale boundaries and tokenizes
-    each segment into fixed-position token slots.
+    Dataset that tokenizes word sequences into fixed-position token slots
+    for the C2F model.
+
+    Supports two input formats (``dataset_format``):
+
+    - ``"c2f"``: reads a ``text`` column of flat word sequences from
+      ``c2f_train.parquet``.
+    - ``"sft"``: reads ``prompt`` + ``response`` columns from ``train.parquet``
+      (veRL SFT format) and flattens them on the fly.
 
     The flat text is split by word count (the strict verification guarantees
     exact counts):
@@ -31,6 +48,8 @@ class C2FDataset(TorchDataset):
         words[30:62] -> scale 4 (text) -> scale_lengths[4] tokens
     """
 
+    VALID_FORMATS = ("c2f", "sft")
+
     def __init__(
         self,
         data_dir: str | Path,
@@ -38,17 +57,28 @@ class C2FDataset(TorchDataset):
         scale_lengths: list[int],
         word_count_constraints: dict[str, int],
         text_word_count: int = 32,
-        parquet_filename: str = "c2f_train.parquet",
+        parquet_filename: str | None = None,
+        dataset_format: str = "c2f",
     ):
         """
         Args:
-            data_dir: Directory containing the C2F training parquet.
+            data_dir: Directory containing the training parquet.
             tokenizer_name_or_path: HF tokenizer name or local checkpoint path.
             scale_lengths: Token positions per scale, e.g. [2, 4, 8, 16, 32].
             word_count_constraints: Dict like {"z_4": 2, "z_3": 4, "z_2": 8, "z_1": 16}.
             text_word_count: Number of words in the text scale (original document).
-            parquet_filename: Name of the parquet file in data_dir.
+            parquet_filename: Name of the parquet file in data_dir.  Defaults to
+                ``"c2f_train.parquet"`` for ``"c2f"`` format and
+                ``"train.parquet"`` for ``"sft"`` format.
+            dataset_format: ``"c2f"`` for flat text column, ``"sft"`` for
+                prompt+response columns (veRL format).
         """
+        if dataset_format not in self.VALID_FORMATS:
+            raise ValueError(
+                f"dataset_format must be one of {self.VALID_FORMATS}, got {dataset_format!r}"
+            )
+
+        self.dataset_format = dataset_format
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name_or_path, trust_remote_code=True
         )
@@ -68,7 +98,12 @@ class C2FDataset(TorchDataset):
             self.word_boundaries.append((pos, pos + wc))
             pos += wc
 
-        # Resolve paths
+        # Resolve default parquet filename based on format
+        if parquet_filename is None:
+            parquet_filename = (
+                "c2f_train.parquet" if dataset_format == "c2f" else "train.parquet"
+            )
+
         data_dir = Path(data_dir)
         parquet_path = data_dir / parquet_filename
         self.dataset = load_dataset(
@@ -87,13 +122,20 @@ class C2FDataset(TorchDataset):
     def __len__(self) -> int:
         return len(self.dataset)
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        text = self.dataset[idx]["text"]
-        words = text.split()
+    def _row_to_words(self, row: dict) -> list[str]:
+        """Extract a flat word list from a dataset row, handling both formats."""
+        if self.dataset_format == "c2f":
+            return row["text"].split()
 
+        # SFT format: parse z_n: labels from response, append prompt words
+        layer_contents = _parse_sft_response(row["response"])
+        flat_text = " ".join(layer_contents + [row["prompt"]])
+        return flat_text.split()
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        words = self._row_to_words(self.dataset[idx])
         input_ids = self._build_token_sequence(words)
         labels = self._build_labels(input_ids)
-
         return {"input_ids": input_ids, "labels": labels}
 
     def _build_token_sequence(self, words: list[str]) -> torch.LongTensor:
@@ -175,8 +217,28 @@ class _C2FDatasetView(TorchDataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        text = self.dataset[idx]["text"]
-        words = text.split()
+        words = self.parent._row_to_words(self.dataset[idx])
         input_ids = self.parent._build_token_sequence(words)
         labels = self.parent._build_labels(input_ids)
         return {"input_ids": input_ids, "labels": labels}
+
+
+def _parse_sft_response(response: str) -> list[str]:
+    """
+    Parse z_n: labels from an SFT response and return content strings per layer.
+
+    Args:
+        response: Raw response with ``z_4: ...\\nz_3: ...`` format.
+
+    Returns:
+        List of content strings (one per layer, in z_4 -> z_1 order).
+    """
+    contents = []
+    for line in response.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        match = _LAYER_PATTERN.match(line)
+        if match:
+            contents.append(match.group(1).strip())
+    return contents

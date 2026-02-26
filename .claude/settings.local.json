@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(python -c:*)",
-      "Bash(.venv/bin/python:*)"
+      "Bash(.venv/bin/python:*)",
+      "Bash(python3 -m json.tool)",
+      "Bash(/Users/andrewxu/Developer/coarse-to-fine/.venv/bin/python -c \"import pyarrow.parquet as pq; t = pq.read_table\\(''/Users/andrewxu/Developer/coarse-to-fine/data/sft_dataset/train.parquet''\\); print\\(''Columns:'', t.column_names\\); print\\(''Rows:'', t.num_rows\\); print\\(''Schema:'', t.schema\\); print\\(''---''\\); print\\(''First row prompt:'', str\\(t[''prompt''][0]\\)[:200]\\); print\\(''First row response:'', str\\(t[''response''][0]\\)[:300]\\)\")",
+      "Bash(chmod +x /Users/andrewxu/Developer/coarse-to-fine/scripts/slurm_06_pretrain.sh)",
+      "Bash(git pull)",
+      "Bash(git stash push -m \"c2f pretrain work\" -- config/experiments/latent_generation.yaml scripts/06_train_decoder.py src/c2f_training/dataset.py src/c2f_training/train.py scripts/slurm_06_pretrain.sh)",
+      "Bash(git stash push -m \"c2f pretrain work\" -- config/experiments/latent_generation.yaml scripts/06_train_decoder.py src/c2f_training/dataset.py src/c2f_training/train.py)",
+      "Bash(git stash pop)"
     ]
   }
 }

@@ -2,8 +2,8 @@
 C2F model pretraining with HuggingFace Trainer + FSDP.
 
 Handles model initialization (from SFT checkpoint, base model, or random),
-weight transfer for compatible parameters, and TrainingArguments construction
-from the experiment YAML config.
+weight transfer for compatible parameters, TrainingArguments construction
+from the experiment YAML config, and per-scale loss logging via W&B.
 """
 from pathlib import Path
 from typing import Any
@@ -13,6 +13,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingA
 
 from src.qwen3_joint.configuration import C2FConfig
 from src.qwen3_joint.modeling import C2FForCausalLM
+
+SCALE_NAMES = ["z_4", "z_3", "z_2", "z_1", "text"]
 
 
 def load_c2f_model(config: dict[str, Any]) -> C2FForCausalLM:
@@ -142,3 +144,73 @@ def build_training_args(
         dataloader_num_workers=4,
         remove_unused_columns=False,
     )
+
+
+def _build_scale_ranges(scale_lengths: list[int]) -> list[tuple[int, int]]:
+    """Compute (start, end) token position ranges for each scale, skipping BOS."""
+    ranges = []
+    pos = 1  # skip BOS at position 0
+    for length in scale_lengths:
+        ranges.append((pos, pos + length))
+        pos += length
+    return ranges
+
+
+class C2FTrainer(Trainer):
+    """HuggingFace Trainer extended with per-scale loss logging for C2F models.
+
+    During training, computes cross-entropy for each scale (z_4, z_3, z_2, z_1,
+    text) alongside the total loss.  Per-scale losses are accumulated across
+    micro-steps and flushed every ``logging_steps``, appearing as
+    ``loss_z_4``, ``loss_z_3``, ... in the W&B dashboard (or any other logger).
+
+    Args:
+        scale_lengths: Token positions per scale, e.g. ``[2, 4, 8, 16, 32]``.
+            Must match the model's ``C2FConfig.scale_lengths``.
+        *args, **kwargs: Forwarded to :class:`transformers.Trainer`.
+    """
+
+    def __init__(self, *args, scale_lengths: list[int] | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        scale_lengths = scale_lengths or [2, 4, 8, 16, 32]
+        self._scale_names = SCALE_NAMES
+        self._scale_ranges = _build_scale_ranges(scale_lengths)
+        self._scale_loss_accum: dict[str, float] = {}
+        self._scale_loss_steps = 0
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        outputs = model(**inputs)
+        loss = outputs.loss
+
+        # Accumulate per-scale losses on the forward-pass logits (no extra grad)
+        if model.training:
+            self._accumulate_scale_losses(outputs.logits.detach(), inputs["labels"])
+
+        return (loss, outputs) if return_outputs else loss
+
+    @torch.no_grad()
+    def _accumulate_scale_losses(
+        self, logits: torch.Tensor, labels: torch.Tensor
+    ) -> None:
+        loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+        for name, (start, end) in zip(self._scale_names, self._scale_ranges):
+            s_logits = logits[:, start:end, :].reshape(-1, logits.size(-1))
+            s_labels = labels[:, start:end].reshape(-1)
+            if (s_labels != -100).any():
+                val = loss_fct(s_logits, s_labels).item()
+                self._scale_loss_accum[name] = (
+                    self._scale_loss_accum.get(name, 0.0) + val
+                )
+        self._scale_loss_steps += 1
+
+    def log(self, logs: dict, **kwargs) -> None:
+        """Inject per-scale losses into the log dict when training loss is flushed."""
+        if self._scale_loss_steps > 0 and "loss" in logs:
+            for name in self._scale_names:
+                if name in self._scale_loss_accum:
+                    logs[f"loss_{name}"] = (
+                        self._scale_loss_accum[name] / self._scale_loss_steps
+                    )
+            self._scale_loss_accum.clear()
+            self._scale_loss_steps = 0
+        super().log(logs, **kwargs)
