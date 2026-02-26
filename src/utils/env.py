@@ -38,6 +38,9 @@ def load_env(env_path: Path | None = None) -> None:
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip()
+            # Strip inline comments (e.g. "value  # comment") so they aren't passed to Hydra etc.
+            if " #" in value:
+                value = value.split(" #", 1)[0].strip()
             # Don't overwrite existing env vars (system takes precedence)
             if key not in os.environ:
                 os.environ[key] = value
@@ -77,13 +80,29 @@ def setup_wandb(config: dict[str, Any], step_name: str | None = None) -> bool:
         os.environ.setdefault("WANDB_DISABLED", "true")
         return False
 
+    # WandB requires API keys to be 40+ characters; invalid/placeholder keys cause a crash later
+    api_key = os.environ.get("WANDB_API_KEY", "").strip()
+    if not api_key or len(api_key) < 40:
+        import sys
+        print(
+            "W&B disabled: WANDB_API_KEY is missing or too short (WandB requires 40+ chars). "
+            "Get a key from https://wandb.ai/authorize and set it in .env.",
+            file=sys.stderr,
+        )
+        os.environ.setdefault("WANDB_DISABLED", "true")
+        return False
+
     # Unset the disabled flag if it was previously set
     os.environ.pop("WANDB_DISABLED", None)
     os.environ["WANDB_MODE"] = wandb_config.get("mode", "online")
 
-    project = wandb_config.get("project", "coarse-to-fine")
+    # Project: use config if set, else .env WANDB_PROJECT, else default
+    project = wandb_config.get("project")
+    if project is None:
+        project = os.environ.get("WANDB_PROJECT", "diffusion-rl")
     os.environ["WANDB_PROJECT"] = project
 
+    # Entity: use config if set; otherwise .env WANDB_ENTITY (from load_env) is used
     entity = wandb_config.get("entity")
     if entity:
         os.environ["WANDB_ENTITY"] = entity

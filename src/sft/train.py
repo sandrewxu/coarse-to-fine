@@ -38,30 +38,45 @@ def build_verl_sft_overrides(
         checkpoint_dir = project_root / checkpoint_dir
 
     train_parquet = dataset_dir / "train.parquet"
+    val_parquet = dataset_dir / "val.parquet"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Model dtype: bf16 recommended for Flash Attention and memory (veRL default is fp32)
+    model_dtype = sft_config.get("model_dtype", "bf16")
+    # Throughput: larger micro_batch = fewer accum steps; use_remove_padding/use_liger = less waste
+    micro_batch = sft_config.get("micro_batch_size_per_gpu", 4)
+    use_remove_padding = sft_config.get("use_remove_padding", False)
+    use_liger = sft_config.get("use_liger", False)
 
     overrides = [
         f"trainer.n_gpus_per_node={num_gpus}",
         f"trainer.default_local_dir={checkpoint_dir}",
         f"model.partial_pretrain={model}",
+        f"model.fsdp_config.model_dtype={model_dtype}",
+        f"model.use_liger={str(use_liger).lower()}",
         f"data.train_files={train_parquet}",
+        f"data.val_files={val_parquet if val_parquet.exists() else train_parquet}",
         f"data.prompt_key=prompt",
-        f"data.max_prompt_length={sft_config.get('max_prompt_length', 512)}",
-        f"data.max_response_length={sft_config.get('max_response_length', 512)}",
+        f"data.response_key=response",
+        f"data.max_length={sft_config.get('max_length', 64)}",
         f"data.train_batch_size={sft_config.get('train_batch_size', 32)}",
+        f"data.micro_batch_size_per_gpu={micro_batch}",
         f"optim.lr={sft_config.get('lr', 1e-5)}",
+        f"use_remove_padding={str(use_remove_padding).lower()}",
     ]
 
     total_epochs = sft_config.get("epochs")
     if total_epochs is not None:
         overrides.append(f"trainer.total_epochs={total_epochs}")
 
-    # W&B integration — veRL reads WANDB_* env vars automatically, but we also
-    # pass the logger override so veRL's Trainer picks it up via Hydra.
+    # W&B integration — override veRL's default trainer.logger=['console','wandb']
+    # so that when wandb is disabled we never touch wandb at all.
     if wandb_enabled:
-        overrides.append("trainer.logger=['wandb']")
+        overrides.append("trainer.logger=['console','wandb']")
         project = os.environ.get("WANDB_PROJECT", "coarse-to-fine")
         overrides.append(f"trainer.project_name={project}")
+    else:
+        overrides.append("trainer.logger=['console']")
 
     return overrides
 
@@ -71,6 +86,6 @@ def get_verl_sft_entrypoint() -> str:
     Return the module path for veRL FSDP SFT trainer (invoked as python -m <path>).
 
     veRL SFT runs in SPMD mode with torchrun; the entrypoint may be
-    verl.trainer.main_fsdp_sft or similar depending on version.
+    verl.trainer.fsdp_sft_trainer.py or similar depending on version.
     """
-    return "verl.trainer.main_fsdp_sft"
+    return "verl.trainer.fsdp_sft_trainer"

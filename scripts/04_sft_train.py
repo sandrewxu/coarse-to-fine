@@ -7,7 +7,12 @@ checkpoint_dir), builds veRL Hydra overrides, and launches the veRL SFT trainer 
 torchrun with nproc_per_node = num_gpus. Checkpoints are saved to checkpoints/sft.
 
 Usage:
-    python scripts/04_sft_train.py [--config config/experiments/latent_generation.yaml]
+    python scripts/04_sft_train.py [--config CONFIG] [OVERRIDES...]
+
+    Overrides are passed to the veRL trainer (Hydra-style), e.g.:
+        trainer.resume_mode=disable
+        trainer.total_epochs=1
+        data.micro_batch_size_per_gpu=16
 
 Requires: pip install -e ".[sft]" and a veRL-compatible environment (see veRL docs).
 Dataset: data/sft_dataset/train.parquet (created by verification step 03 with sft.dataset_dir).
@@ -39,6 +44,12 @@ def main() -> int:
         default=PROJECT_ROOT / "config" / "experiments" / "latent_generation.yaml",
         help="Path to experiment YAML with 'sft' section",
     )
+    parser.add_argument(
+        "overrides",
+        nargs="*",
+        metavar="OVERRIDE",
+        help="Extra Hydra overrides for veRL (e.g. trainer.resume_mode=disable)",
+    )
     args = parser.parse_args()
 
     if not args.config.exists():
@@ -63,6 +74,7 @@ def main() -> int:
     from src.sft.train import build_verl_sft_overrides, get_verl_sft_entrypoint
 
     overrides = build_verl_sft_overrides(sft_config, PROJECT_ROOT, wandb_enabled=wandb_enabled)
+    overrides.extend(args.overrides)
     entrypoint = get_verl_sft_entrypoint()
 
     train_parquet = (PROJECT_ROOT / sft_config.get("dataset_dir", "data/sft_dataset")) / "train.parquet"

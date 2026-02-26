@@ -2,11 +2,12 @@
 # Defines coarse-to-fine latent layer structure and validation constraints
 
 # ── Weights & Biases ─────────────────────────────────────────────────────
-# API key is loaded from .env (WANDB_API_KEY).  Set enabled: true to log.
+# WANDB_API_KEY, WANDB_ENTITY, WANDB_PROJECT are loaded from .env via load_env().
+# Set project/entity to null to use those env values; set them here to override.
 wandb:
-  enabled: false                     # flip to true when ready to log
-  project: "coarse-to-fine"
-  entity: null                       # uses WANDB_ENTITY from .env or W&B default
+  enabled: true                      # set false to disable logging
+  project: null                      # from .env WANDB_PROJECT (e.g. diffusion-rl)
+  entity: null                       # from .env WANDB_ENTITY (e.g. andrew-xu)
   group: "latent-generation"         # groups related runs together
   tags: ["qwen3-4b"]
   mode: "online"                     # "online", "offline", or "disabled"
@@ -43,15 +44,18 @@ sft:
   checkpoint_dir: "checkpoints/sft"
   prompt_data: "data/prompt_data/gpt-5-nano-2025-08-07/docs_0000010000/gemini-3-pro-7/latent-generation/sft.jsonl"
   # Optional training overrides (used by 04_sft_train when building veRL config)
-  max_prompt_length: 512
-  max_response_length: 512
-  train_batch_size: 32
-  epochs: 3
+  max_length: 256
+  model_dtype: bf16
+  micro_batch_size_per_gpu: 16
+  use_remove_padding: true
+  use_liger: true
+  train_batch_size: 64
+  epochs: 2
   lr: 1.0e-5
 
 # Step 5: Local generation with vLLM
 generation:
-  model_path: "checkpoints/sft"  # SFT checkpoint path or HF model name
+  model_path: "checkpoints/sft/sft_backup_3epoch/huggingface"  # SFT checkpoint path or HF model name
   prompt_dataset: "data/sft_dataset/train.parquet"  # Parquet with prompt column
   output_dir: "data/local_generations"
   num_gpus: 1  # vLLM tensor parallelism (1-4)

@@ -5,7 +5,7 @@
 #SBATCH --gpus=h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=1:00:00
+#SBATCH --time=4:00:00
 #SBATCH --partition=gpu
 #SBATCH --output=logs/generation/qwen3_4b_generate_%j.out
 #SBATCH --error=logs/generation/qwen3_4b_generate_%j.err
@@ -23,8 +23,4 @@ mkdir -p "$PROJECT_ROOT/logs/generation"
 cd "$PROJECT_ROOT"
 
 # Activate venv if present
-if [ -d ".venv" ]; then
-  source .venv/bin/activate
-fi
-
-python scripts/05_generate_local.py --config config/experiments/latent_generation.yaml
+uv run scripts/05_generate_local.py --config config/experiments/latent_generation.yaml
