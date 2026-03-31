@@ -98,6 +98,7 @@ class C2FRewardManager:
         tokenizer,
         num_examine: int = 0,
         config_path: str | None = None,
+        **kwargs,
     ):
         # ── Load experiment config ───────────────────────────────────────────
         if config_path is None:

@@ -44,6 +44,7 @@ Requires: pip install -e ".[rl]" and a veRL-compatible environment.
 Dataset:  data/sft_dataset/train.parquet (from step 3) must exist.
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -140,6 +141,8 @@ def main() -> int:
     if not args.config.exists():
         print(f"Error: Config not found: {args.config}", file=sys.stderr)
         return 1
+
+    os.environ.pop("ROCR_VISIBLE_DEVICES", None)
 
     # ── Environment and W&B ─────────────────────────────────────────────────
     from src.utils.env import load_env, setup_wandb

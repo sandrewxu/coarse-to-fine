@@ -55,7 +55,7 @@ sft:
 
 # Step 5: Local generation with vLLM
 generation:
-  model_path: "checkpoints/sft/sft_backup_3epoch/huggingface"  # SFT checkpoint path or HF model name
+  model_path: "checkpoints/sft/global_step_292/huggingface"  # SFT checkpoint path or HF model name
   prompt_dataset: "data/sft_dataset/train.parquet"  # Parquet with prompt column
   output_dir: "data/local_generations"
   num_gpus: 1  # vLLM tensor parallelism (1-4)
@@ -101,7 +101,7 @@ rl:
   # Phase A: GRPO on q_φ (SFT model), p_θ (C2F) frozen
   # Reward = log p_θ(x, z) / num_tokens  +  format_bonus
   sft_rl:
-    model_path: "checkpoints/sft/sft_backup_3epoch/huggingface"  # q_φ start checkpoint
+    model_path: "checkpoints/sft/global_step_292/huggingface"  # q_φ start checkpoint
     c2f_model_path: "checkpoints/decoder"                        # frozen p_θ (reward)
     num_gpus: 1
     dataset_dir: "data/rl_dataset"
@@ -114,6 +114,8 @@ rl:
     lr: 1.0e-6
     kl_coef: 0.01                  # KL penalty coefficient for actor loss
     format_bonus_weight: 0.1       # bonus when all 4 layers have correct word count
+    ppo_micro_batch_size_per_gpu: 8  # micro-batch size per GPU for actor PPO update
+    dataloader_num_workers: 4       # DataLoader workers (verl default is 8; match CPU count)
     epochs: 1
 
   # Phase B: Supervised fine-tuning of p_θ (C2F model), q_φ (SFT) frozen

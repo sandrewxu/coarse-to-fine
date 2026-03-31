@@ -50,49 +50,68 @@ def build_verl_grpo_overrides(
     if not checkpoint_dir.is_absolute():
         checkpoint_dir = project_root / checkpoint_dir
 
+    # Resolve model_path to absolute so veRL can load tokenizer/config from it.
+    # If it looks like an HF hub id (no path separators, not a local dir) leave as-is.
+    model_path_resolved = Path(model_path)
+    if not model_path_resolved.is_absolute() and (
+        "/" in model_path or model_path_resolved.exists() or (project_root / model_path_resolved).exists()
+    ):
+        candidate = project_root / model_path_resolved
+        if candidate.exists():
+            model_path = str(candidate)
+
     train_parquet = dataset_dir / "sft_rl.parquet"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     overrides = [
         # ── Trainer ─────────────────────────────────────────────────────────
-        f"trainer.n_gpus_per_node={num_gpus}",
-        f"trainer.default_local_dir={checkpoint_dir}",
-        # ── Model ────────────────────────────────────────────────────────────
-        f"model.partial_pretrain={model_path}",
-        f"model.fsdp_config.model_dtype=bf16",
+        f"++trainer.n_gpus_per_node={num_gpus}",
+        f"++trainer.default_local_dir={checkpoint_dir}",
+        # ── Model (main_ppo uses actor_rollout_ref.model.*, not model.*) ───────
+        # path = base model for architecture/tokenizer; partial_pretrain = weights to load
+        f"++actor_rollout_ref.model.path={model_path}",
+        f"++actor_rollout_ref.model.partial_pretrain={model_path}",
+        f"++actor_rollout_ref.model.fsdp_config.model_dtype=bf16",
         # ── Data ─────────────────────────────────────────────────────────────
-        f"data.train_files={train_parquet}",
-        f"data.val_files={train_parquet}",
-        f"data.prompt_key=prompt",
-        f"data.max_prompt_length={rl_sft_config.get('max_prompt_length', 64)}",
-        f"data.max_response_length={rl_sft_config.get('max_response_length', 256)}",
-        f"data.train_batch_size={rl_sft_config.get('train_batch_size', 64)}",
+        f"++data.train_files={train_parquet}",
+        f"++data.val_files={train_parquet}",
+        "++data.prompt_key=prompt",
+        f"++data.max_prompt_length={rl_sft_config.get('max_prompt_length', 64)}",
+        f"++data.max_response_length={rl_sft_config.get('max_response_length', 256)}",
+        f"++data.train_batch_size={rl_sft_config.get('train_batch_size', 64)}",
+        f"++data.dataloader_num_workers={rl_sft_config.get('dataloader_num_workers', 4)}",
         # ── Algorithm: GRPO ──────────────────────────────────────────────────
-        "algorithm.adv_estimator=grpo",
-        "algorithm.use_kl_in_reward=false",
+        "++algorithm.adv_estimator=grpo",
+        "++algorithm.use_kl_in_reward=false",
         # ── Actor / Rollout ───────────────────────────────────────────────────
-        f"actor_rollout_ref.rollout.n={rl_sft_config.get('rollout_n', 8)}",
-        f"actor_rollout_ref.rollout.temperature={rl_sft_config.get('temperature', 1.0)}",
-        "actor_rollout_ref.actor.use_kl_loss=true",
-        f"actor_rollout_ref.actor.kl_loss_coef={rl_sft_config.get('kl_coef', 0.01)}",
-        f"actor_rollout_ref.actor.optim.lr={rl_sft_config.get('lr', 1e-6)}",
-        # ── Custom reward function ────────────────────────────────────────────
-        "reward_model.reward_manager=custom",
-        "reward_model.custom_reward_function.path=src/rl/reward.py",
-        "reward_model.custom_reward_function.name=C2FRewardManager",
+        f"++actor_rollout_ref.rollout.n={rl_sft_config.get('rollout_n', 8)}",
+        f"++actor_rollout_ref.rollout.temperature={rl_sft_config.get('temperature', 1.0)}",
+        f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
+        "++actor_rollout_ref.actor.use_kl_loss=true",
+        f"++actor_rollout_ref.actor.kl_loss_coef={rl_sft_config.get('kl_coef', 0.01)}",
+        f"++actor_rollout_ref.actor.optim.lr={rl_sft_config.get('lr', 1e-6)}",
+        f"++actor_rollout_ref.actor.ppo_mini_batch_size={rl_sft_config.get('train_batch_size', 64)}",
+        f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
+        f"++actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
+        # ── Custom reward manager (full class, loaded via importlib) ─────────
+        # source=importlib tells veRL to load the class from a file rather than
+        # looking it up in the built-in registry (which doesn't know "custom").
+        "++reward_manager.source=importlib",
+        "++reward_manager.name=C2FRewardManager",
+        f"++reward_manager.module.path={project_root / 'src' / 'rl' / 'reward.py'}",
     ]
 
     total_epochs = rl_sft_config.get("epochs")
     if total_epochs is not None:
-        overrides.append(f"trainer.total_epochs={total_epochs}")
+        overrides.append(f"++trainer.total_epochs={total_epochs}")
 
     # W&B integration (mirrors build_verl_sft_overrides pattern)
     if wandb_enabled:
-        overrides.append("trainer.logger=['console','wandb']")
+        overrides.append("++trainer.logger=['console','wandb']")
         project = os.environ.get("WANDB_PROJECT", "coarse-to-fine")
-        overrides.append(f"trainer.project_name={project}")
+        overrides.append(f"++trainer.project_name={project}")
     else:
-        overrides.append("trainer.logger=['console']")
+        overrides.append("++trainer.logger=['console']")
 
     return overrides
 

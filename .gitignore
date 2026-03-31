@@ -21,9 +21,15 @@ data/decoder_dataset/
 data/shards/
 data/prompt_data/
 data/raw/
+data/tinystoriesv2_shuffled/
+data/rl_dataset/
 
 # Model checkpoints
 checkpoints/
+
+# Logs and outputs
+logs/
+outputs/
 
 # W&B
 wandb/
