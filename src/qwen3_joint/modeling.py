@@ -226,6 +226,11 @@ class C2FModel(Qwen3Model):
         # C2F: per-scale learned absolute position embeddings
         self.scale_pos_emb = C2FScaleEmbedding(config)
 
+        # C2F: cache for the block-prefix mask, keyed by (seq_len, device, dtype).
+        # The mask is deterministic given config+shape+dtype, so there is no need
+        # to recompute it on every forward pass.
+        self._mask_cache: dict[tuple, torch.Tensor] = {}
+
         self.post_init()
 
     @merge_with_config_defaults
@@ -268,14 +273,27 @@ class C2FModel(Qwen3Model):
 
         # C2F: replace the standard causal mask with the block-prefix mask.
         # The standard mask is not valid for multi-scale prediction.
-        causal_mask_mapping = {
-            "full_attention": create_c2f_block_causal_mask(
+        #
+        # The mask is the same for every batch at a given (seq_len, device, dtype),
+        # so we cache it to avoid reallocating on every forward pass.
+        #
+        # Both "full_attention" and "sliding_window_attention" layer types get the
+        # same C2F mask.  Qwen3 models larger than 4B use sliding-window attention
+        # on some layers; without this key those models would raise a KeyError.
+        seq_len = inputs_embeds.shape[1]
+        mask_key = (seq_len, inputs_embeds.device, inputs_embeds.dtype)
+        if mask_key not in self._mask_cache:
+            self._mask_cache[mask_key] = create_c2f_block_causal_mask(
                 config=self.config,
-                seq_len=inputs_embeds.shape[1],
-                batch_size=inputs_embeds.shape[0],
+                seq_len=seq_len,
+                batch_size=1,  # stored without batch dim; expanded below
                 device=inputs_embeds.device,
                 dtype=inputs_embeds.dtype,
             )
+        c2f_mask = self._mask_cache[mask_key].expand(inputs_embeds.shape[0], 1, seq_len, seq_len)
+        causal_mask_mapping = {
+            "full_attention": c2f_mask,
+            "sliding_window_attention": c2f_mask,  # C2F: needed for Qwen3 models with SWA layers
         }
 
         hidden_states = inputs_embeds

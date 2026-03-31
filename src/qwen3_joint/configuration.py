@@ -38,6 +38,11 @@ class C2FConfig(Qwen3Config):
             scale_lengths = [2, 4, 8, 16, 32]
         self.scale_lengths = scale_lengths
 
+        # C2F: the block-prefix mask is an arbitrary additive bias that Flash
+        # Attention 2 does not support — FA2 ignores custom masks and silently
+        # uses its own causal kernel, breaking the C2F attention pattern.
+        # Force eager attention so the mask is always applied correctly.
+        kwargs.setdefault("attn_implementation", "eager")
         super().__init__(**kwargs)
 
     # C2F: derived properties so callers never have to recompute these.
