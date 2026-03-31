@@ -9,7 +9,16 @@
       "Bash(git pull)",
       "Bash(git stash push -m \"c2f pretrain work\" -- config/experiments/latent_generation.yaml scripts/06_train_decoder.py src/c2f_training/dataset.py src/c2f_training/train.py scripts/slurm_06_pretrain.sh)",
       "Bash(git stash push -m \"c2f pretrain work\" -- config/experiments/latent_generation.yaml scripts/06_train_decoder.py src/c2f_training/dataset.py src/c2f_training/train.py)",
-      "Bash(git stash pop)"
+      "Bash(git stash pop)",
+      "Bash(git add:*)",
+      "WebSearch",
+      "WebFetch(domain:verl.readthedocs.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:deepwiki.com)",
+      "mcp__ide__getDiagnostics",
+      "Bash(python3:*)",
+      "Bash(source:*)"
     ]
   }
 }

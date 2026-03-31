@@ -95,3 +95,39 @@ c2f_training:
   report_to: "none"  # "wandb" or "none"
   run_name: "c2f-pretrain"
   seed: 42
+
+# Step 7: ELBO Optimisation — GRPO on q_φ / Supervised on p_θ
+rl:
+  # Phase A: GRPO on q_φ (SFT model), p_θ (C2F) frozen
+  # Reward = log p_θ(x, z) / num_tokens  +  format_bonus
+  sft_rl:
+    model_path: "checkpoints/sft/sft_backup_3epoch/huggingface"  # q_φ start checkpoint
+    c2f_model_path: "checkpoints/decoder"                        # frozen p_θ (reward)
+    num_gpus: 1
+    dataset_dir: "data/rl_dataset"
+    checkpoint_dir: "checkpoints/rl/sft"
+    rollout_n: 8                    # GRPO group size (samples per prompt)
+    max_prompt_length: 64
+    max_response_length: 256
+    train_batch_size: 64
+    temperature: 1.0
+    lr: 1.0e-6
+    kl_coef: 0.01                  # KL penalty coefficient for actor loss
+    format_bonus_weight: 0.1       # bonus when all 4 layers have correct word count
+    epochs: 1
+
+  # Phase B: Supervised fine-tuning of p_θ (C2F model), q_φ (SFT) frozen
+  # Gradient: E_{q_φ}[∇_θ log p_θ(x, z)]
+  c2f_finetune:
+    model_path: "checkpoints/decoder"         # p_θ start checkpoint
+    sft_model_path: "checkpoints/rl/sft"      # frozen q_φ (generates z samples)
+    dataset_dir: "data/rl_dataset"
+    generation_output_dir: "data/rl_dataset/c2f_finetune"
+    checkpoint_dir: "checkpoints/rl/c2f"
+    num_gpus: 1
+    num_samples: null               # null = all prompts from sft train parquet
+    per_device_batch_size: 8
+    gradient_accumulation_steps: 4
+    lr: 5.0e-5
+    epochs: 3
+    fsdp: "full_shard"
