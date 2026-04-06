@@ -81,6 +81,7 @@ def run_sft_rl(
     config: dict[str, Any],
     project_root: Path,
     *,
+    config_path: str | Path | None = None,
     wandb_enabled: bool = False,
     extra_overrides: list[str] | None = None,
 ) -> int:
@@ -160,9 +161,12 @@ def run_sft_rl(
 
     # Export config path for the reward manager
     _venv = os.environ.get("VIRTUAL_ENV") or str(Path(sys.executable).parent.parent)
+    resolved_config_path = str(config_path) if config_path else str(
+        project_root / "config" / "latent_generation.yaml"
+    )
     env = {
         **os.environ,
-        "C2F_CONFIG_PATH": str(project_root / "config/experiments/latent_generation.yaml"),
+        "C2F_CONFIG_PATH": resolved_config_path,
         "UV_NO_SYNC": "1",
         "UV_PROJECT_ENVIRONMENT": _venv,
     }

@@ -18,20 +18,20 @@ Alternates between two training phases to optimise the ELBO:
 
 Usage:
     # One round, one phase at a time:
-    python scripts/07_rl_train.py --phase sft  --config config/experiments/latent_generation.yaml
-    python scripts/07_rl_train.py --phase c2f  --config config/experiments/latent_generation.yaml
+    python scripts/07_rl_train.py --phase sft  --config config/latent_generation.yaml
+    python scripts/07_rl_train.py --phase c2f  --config config/latent_generation.yaml
 
     # One full round (Phase A → Phase B):
-    python scripts/07_rl_train.py --phase both --config config/experiments/latent_generation.yaml
+    python scripts/07_rl_train.py --phase both --config config/latent_generation.yaml
 
     # Smoke-test Phase A (small batch, few epochs):
     python scripts/07_rl_train.py --phase sft \\
-        --config config/experiments/latent_generation.yaml \\
+        --config config/latent_generation.yaml \\
         rl.sft_rl.epochs=1 rl.sft_rl.train_batch_size=8 rl.sft_rl.rollout_n=4
 
     # Smoke-test Phase B (100 samples, 1 epoch):
     python scripts/07_rl_train.py --phase c2f \\
-        --config config/experiments/latent_generation.yaml \\
+        --config config/latent_generation.yaml \\
         rl.c2f_finetune.num_samples=100 rl.c2f_finetune.epochs=1
 
 Config overrides:
@@ -50,13 +50,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-
-
-def _load_config(config_path: Path) -> dict:
-    import yaml
-
-    with open(config_path) as f:
-        return yaml.safe_load(f)
 
 
 def _cast_value(raw: str):
@@ -124,7 +117,7 @@ def main() -> int:
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT / "config" / "experiments" / "latent_generation.yaml",
+        default=PROJECT_ROOT / "config" / "latent_generation.yaml",
         help="Path to experiment YAML with 'rl' section",
     )
     parser.add_argument(
@@ -149,10 +142,11 @@ def main() -> int:
     os.environ["UV_PROJECT_ENVIRONMENT"] = _venv
 
     # ── Environment and W&B ─────────────────────────────────────────────────
+    from src.config import load_config
     from src.utils.env import load_env, setup_wandb
 
     load_env()
-    config = _load_config(args.config)
+    config = load_config(args.config)
     wandb_enabled = setup_wandb(config, step_name=f"rl-{args.phase}")
     if wandb_enabled:
         print(f"W&B logging enabled for rl-{args.phase}")
@@ -174,6 +168,7 @@ def main() -> int:
         rc = run_sft_rl(
             config,
             PROJECT_ROOT,
+            config_path=args.config.resolve(),
             wandb_enabled=wandb_enabled,
             extra_overrides=verl_overrides,
         )

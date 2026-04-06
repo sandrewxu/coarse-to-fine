@@ -9,7 +9,7 @@ Saves verification stats to --output.
 Usage:
     python scripts/03_verify_outputs.py \
         --input data/batch_outputs/.../output.jsonl \
-        --config config/experiments/latent_generation.yaml \
+        --config config/latent_generation.yaml \
         --prompts data/prompt_data/.../sft.jsonl \
         --output data/verified/latent_generation_10k_v1
 """
@@ -18,20 +18,13 @@ import json
 import sys
 from pathlib import Path
 
-import yaml
-
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.config import load_config
 from src.data.schemas import BatchOutputItem, VerificationStats
 from src.sft.dataset import create_and_save_dataset
 from src.verification.rule_based import RuleBasedVerifier
-
-
-def load_config(config_path: str | Path) -> dict:
-    """Load YAML configuration file."""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
 
 
 def extract_prompts_from_sft_jsonl(sft_jsonl_path: Path) -> dict[str, str]:

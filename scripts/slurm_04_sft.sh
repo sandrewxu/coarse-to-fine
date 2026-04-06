@@ -13,7 +13,7 @@
 
 # Step 4: Supervised Fine-Tuning with veRL.
 # Requires: data/sft_dataset/train.parquet from step 3 (03_verify_outputs.py).
-# Config: config/experiments/latent_generation.yaml (sft section).
+# Config: config/latent_generation.yaml (sft section).
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,4 +26,4 @@ if [ -d ".venv" ]; then
   source .venv/bin/activate
 fi
 
-python scripts/04_sft_train.py --config config/experiments/latent_generation.yaml
+python scripts/04_sft_train.py --config config/latent_generation.yaml

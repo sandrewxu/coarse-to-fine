@@ -19,7 +19,7 @@
 #   - checkpoints/decoder/                   (Phase A: frozen p_θ reward)
 #   - checkpoints/rl/sft/                    (Phase B: updated q_φ, after Phase A)
 #
-# Config: config/experiments/latent_generation.yaml (rl section).
+# Config: config/latent_generation.yaml (rl section).
 #
 # Phase selection (default: both):
 #   PHASE=sft   — only Phase A (GRPO on q_φ)
@@ -38,7 +38,7 @@ if [ -d ".venv" ]; then
 fi
 
 PHASE=${PHASE:-both}
-CONFIG=${CONFIG:-config/experiments/latent_generation.yaml}
+CONFIG=${CONFIG:-config/latent_generation.yaml}
 
 # Export config path so the reward manager can locate the experiment YAML
 # without needing to hard-code the path inside the Python module.

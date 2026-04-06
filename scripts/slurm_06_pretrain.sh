@@ -13,7 +13,7 @@
 
 # Step 6: C2F joint model pretraining with HuggingFace Trainer + FSDP.
 # Requires: training parquet from step 3 or step 5.
-# Config: config/experiments/latent_generation.yaml (c2f_training section).
+# Config: config/latent_generation.yaml (c2f_training section).
 #
 # For multi-GPU, change --gpus and NUM_GPUS below:
 #   #SBATCH --gpus=h100:4
@@ -34,7 +34,7 @@ NUM_GPUS=${NUM_GPUS:-1}
 
 if [ "$NUM_GPUS" -gt 1 ]; then
   accelerate launch --num_processes="$NUM_GPUS" \
-    scripts/06_train_decoder.py --config config/experiments/latent_generation.yaml
+    scripts/06_train_decoder.py --config config/latent_generation.yaml
 else
-  python scripts/06_train_decoder.py --config config/experiments/latent_generation.yaml
+  python scripts/06_train_decoder.py --config config/latent_generation.yaml
 fi

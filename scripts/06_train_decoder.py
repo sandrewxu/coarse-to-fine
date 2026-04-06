@@ -2,7 +2,7 @@
 """
 Pretrain the C2F (Coarse-to-Fine) joint model.
 
-Reads config from config/experiments/latent_generation.yaml (c2f_training section),
+Reads config from config/latent_generation.yaml (c2f_training section),
 loads training data (either flattened c2f_train.parquet or SFT train.parquet),
 tokenizes into C2F format, and trains with HuggingFace Trainer + FSDP.
 
@@ -24,15 +24,15 @@ Supports two dataset formats (set ``dataset_format`` in config):
 
 Usage:
     # Single GPU:
-    python scripts/06_train_decoder.py --config config/experiments/latent_generation.yaml
+    python scripts/06_train_decoder.py --config config/latent_generation.yaml
 
     # Multi-GPU with accelerate + FSDP:
     accelerate launch --num_processes=4 scripts/06_train_decoder.py \
-        --config config/experiments/latent_generation.yaml
+        --config config/latent_generation.yaml
 
     # Resume from checkpoint:
     python scripts/06_train_decoder.py \
-        --config config/experiments/latent_generation.yaml \
+        --config config/latent_generation.yaml \
         --resume-from checkpoints/decoder/checkpoint-500
 
 Requires: pip install -e ".[c2f]" and a CUDA-capable environment.
@@ -42,16 +42,8 @@ import os
 import sys
 from pathlib import Path
 
-import yaml
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-
-
-def load_config(config_path: Path) -> dict:
-    """Load YAML config."""
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
 
 
 def _is_main_process() -> bool:
@@ -66,7 +58,7 @@ def main() -> int:
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT / "config" / "experiments" / "latent_generation.yaml",
+        default=PROJECT_ROOT / "config" / "latent_generation.yaml",
         help="Path to experiment YAML with 'c2f_training' section",
     )
     parser.add_argument(
@@ -82,6 +74,7 @@ def main() -> int:
         return 1
 
     # Load .env (secrets) and configure W&B before any training imports
+    from src.config import load_config
     from src.utils.env import load_env, setup_wandb
 
     load_env()

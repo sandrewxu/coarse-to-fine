@@ -14,7 +14,7 @@ Implements veRL's class-based reward manager interface:
 
 veRL provides the SFT model tokenizer at init so we can decode response token
 IDs back to strings.  The C2F model and space tokenizer are loaded from paths
-stored in the experiment YAML (``config/experiments/latent_generation.yaml``),
+stored in the experiment YAML (``config/latent_generation.yaml``),
 which is located via the ``C2F_CONFIG_PATH`` environment variable (set by the
 SLURM/launch script before torchrun) or defaults to the repo-relative path.
 """
@@ -36,14 +36,7 @@ from src.verification.rule_based import RuleBasedVerifier
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 # Default config path (relative to repo root), overridden by C2F_CONFIG_PATH env var.
-_DEFAULT_CONFIG_PATH = "config/experiments/latent_generation.yaml"
-
-
-def _load_yaml(path: str | Path) -> dict:
-    import yaml
-
-    with open(path) as f:
-        return yaml.safe_load(f)
+_DEFAULT_CONFIG_PATH = "config/latent_generation.yaml"
 
 
 def _load_c2f_weights(model: C2FForCausalLM, checkpoint_path: Path) -> C2FForCausalLM:
@@ -89,7 +82,7 @@ class C2FRewardManager:
             veRL compatibility argument (unused).
         config_path:
             Path to the experiment YAML.  Defaults to the ``C2F_CONFIG_PATH``
-            environment variable, or ``config/experiments/latent_generation.yaml``
+            environment variable, or ``config/latent_generation.yaml``
             relative to the repository root.
     """
 
@@ -101,9 +94,11 @@ class C2FRewardManager:
         **kwargs,
     ):
         # ── Load experiment config ───────────────────────────────────────────
+        from src.config import load_config
+
         if config_path is None:
             config_path = os.environ.get("C2F_CONFIG_PATH", _DEFAULT_CONFIG_PATH)
-        self.config = _load_yaml(config_path)
+        self.config = load_config(config_path)
 
         self.scale_lengths: list[int] = self.config["scale_lengths"]
         self.word_count_constraints: dict[str, int] = self.config["word_count_constraints"]

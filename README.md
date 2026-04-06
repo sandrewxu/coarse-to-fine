@@ -305,7 +305,7 @@ Parses batch API response JSON lines, checks each output against word-count cons
 ```bash
 python scripts/03_verify_outputs.py \
   --input  data/batch_outputs/.../output.jsonl \
-  --config config/experiments/latent_generation.yaml \
+  --config config/latent_generation.yaml \
   --prompts data/prompt_data/.../sft.jsonl \
   --output data/verified/latent_generation_10k_v1
 ```
@@ -319,7 +319,7 @@ Output: `data/sft_dataset/train.parquet` with columns `prompt` (32-word document
 Fine-tunes Qwen3-4B as $q_\phi$ on the verified parquet using veRL's FSDP SFT trainer.
 
 ```bash
-python scripts/04_sft_train.py --config config/experiments/latent_generation.yaml
+python scripts/04_sft_train.py --config config/latent_generation.yaml
 
 # Pass Hydra overrides directly to veRL:
 python scripts/04_sft_train.py \
@@ -336,11 +336,11 @@ GPU count is set by `sft.num_gpus` in the config (1–4). SLURM: `scripts/slurm_
 Runs the SFT model at scale using vLLM offline inference, verifies word counts, and flattens outputs for C2F training.
 
 ```bash
-python scripts/05_generate_local.py --config config/experiments/latent_generation.yaml
+python scripts/05_generate_local.py --config config/latent_generation.yaml
 
 # Limit samples or change output directory:
 python scripts/05_generate_local.py \
-  --config config/experiments/latent_generation.yaml \
+  --config config/latent_generation.yaml \
   --num-samples 100000 \
   --output-dir data/local_generations/run2
 ```
@@ -359,15 +359,15 @@ Trains $p_\theta$ (`C2FForCausalLM`) on the flattened latent+text sequences usin
 
 ```bash
 # Single GPU:
-python scripts/06_train_decoder.py --config config/experiments/latent_generation.yaml
+python scripts/06_train_decoder.py --config config/latent_generation.yaml
 
 # Multi-GPU with FSDP:
 accelerate launch --num_processes=4 scripts/06_train_decoder.py \
-  --config config/experiments/latent_generation.yaml
+  --config config/latent_generation.yaml
 
 # Resume from a checkpoint:
 python scripts/06_train_decoder.py \
-  --config config/experiments/latent_generation.yaml \
+  --config config/latent_generation.yaml \
   --resume-from checkpoints/decoder/checkpoint-500
 ```
 
@@ -386,15 +386,15 @@ Alternates Phase A (GRPO on $q_\phi$) and Phase B (supervised on $p_\theta$). Ea
 ```bash
 # Phase A only — GRPO on q_φ (C2F frozen):
 python scripts/07_rl_train.py --phase sft \
-  --config config/experiments/latent_generation.yaml
+  --config config/latent_generation.yaml
 
 # Phase B only — supervised p_θ (SFT frozen):
 python scripts/07_rl_train.py --phase c2f \
-  --config config/experiments/latent_generation.yaml
+  --config config/latent_generation.yaml
 
 # One full round of alternation (Phase A then Phase B):
 python scripts/07_rl_train.py --phase both \
-  --config config/experiments/latent_generation.yaml
+  --config config/latent_generation.yaml
 ```
 
 Dot-path overrides (e.g. `rl.sft_rl.epochs=1`) update the in-memory config and apply to the corresponding phase. Non-`rl.*` overrides are forwarded as Hydra overrides directly to the veRL trainer.
@@ -402,12 +402,12 @@ Dot-path overrides (e.g. `rl.sft_rl.epochs=1`) update the in-memory config and a
 ```bash
 # Smoke-test Phase A (small batch):
 python scripts/07_rl_train.py --phase sft \
-  --config config/experiments/latent_generation.yaml \
+  --config config/latent_generation.yaml \
   rl.sft_rl.epochs=1 rl.sft_rl.train_batch_size=8 rl.sft_rl.rollout_n=4
 
 # Smoke-test Phase B (100 prompts, 1 epoch):
 python scripts/07_rl_train.py --phase c2f \
-  --config config/experiments/latent_generation.yaml \
+  --config config/latent_generation.yaml \
   rl.c2f_finetune.num_samples=100 rl.c2f_finetune.epochs=1
 ```
 
@@ -417,7 +417,7 @@ SLURM: `scripts/slurm_07_rl.sh`. Set `PHASE=sft|c2f|both` before submitting.
 
 ## Configuration
 
-All parameters live in `config/experiments/latent_generation.yaml`. Key sections:
+Defaults are defined in `src/config.py` (Pydantic schema); experiment-specific overrides go in `config/latent_generation.yaml`. Key sections:
 
 | Section | Controls |
 |---|---|

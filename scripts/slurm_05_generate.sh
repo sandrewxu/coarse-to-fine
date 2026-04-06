@@ -13,7 +13,7 @@
 
 # Step 5: Generate latent outputs from SFT model via vLLM, verify, and flatten for C2F.
 # Requires: SFT checkpoint (config generation.model_path) and prompt dataset.
-# Config: config/experiments/latent_generation.yaml (generation section).
+# Config: config/latent_generation.yaml (generation section).
 # Optional: add --num-samples N or --output-dir DIR after the script name below.
 
 set -e
@@ -23,4 +23,4 @@ mkdir -p "$PROJECT_ROOT/logs/generation"
 cd "$PROJECT_ROOT"
 
 # Activate venv if present
-uv run scripts/05_generate_local.py --config config/experiments/latent_generation.yaml
+uv run scripts/05_generate_local.py --config config/latent_generation.yaml

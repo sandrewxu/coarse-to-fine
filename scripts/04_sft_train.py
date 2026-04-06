@@ -2,7 +2,7 @@
 """
 Run Supervised Fine-Tuning with veRL.
 
-Reads SFT options from config/experiments/latent_generation.yaml (model, num_gpus, dataset_dir,
+Reads SFT options from config/latent_generation.yaml (model, num_gpus, dataset_dir,
 checkpoint_dir), builds veRL Hydra overrides, and launches the veRL SFT trainer via
 torchrun with nproc_per_node = num_gpus. Checkpoints are saved to checkpoints/sft.
 
@@ -27,13 +27,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def load_config(config_path: Path) -> dict:
-    """Load YAML config."""
-    import yaml
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run SFT with veRL (config: model, num_gpus, dataset_dir, checkpoint_dir)"
@@ -41,7 +34,7 @@ def main() -> int:
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT / "config" / "experiments" / "latent_generation.yaml",
+        default=PROJECT_ROOT / "config" / "latent_generation.yaml",
         help="Path to experiment YAML with 'sft' section",
     )
     parser.add_argument(
@@ -57,6 +50,7 @@ def main() -> int:
         return 1
 
     # Load .env (secrets) and configure W&B before any training imports
+    from src.config import load_config
     from src.utils.env import load_env, setup_wandb
 
     load_env()

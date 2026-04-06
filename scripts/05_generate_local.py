@@ -8,11 +8,11 @@ generation parquet and a flattened C2F training parquet.
 
 Usage:
     python scripts/05_generate_local.py \
-        --config config/experiments/latent_generation.yaml
+        --config config/latent_generation.yaml
 
     # Override number of samples or output directory:
     python scripts/05_generate_local.py \
-        --config config/experiments/latent_generation.yaml \
+        --config config/latent_generation.yaml \
         --num-samples 1000 \
         --output-dir data/local_generations/run2
 
@@ -22,16 +22,8 @@ import argparse
 import sys
 from pathlib import Path
 
-import yaml
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-
-
-def load_config(config_path: Path) -> dict:
-    """Load YAML config."""
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
 
 
 def main() -> int:
@@ -41,7 +33,7 @@ def main() -> int:
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT / "config" / "experiments" / "latent_generation.yaml",
+        default=PROJECT_ROOT / "config" / "latent_generation.yaml",
         help="Path to experiment YAML with 'generation' section",
     )
     parser.add_argument(
@@ -63,6 +55,7 @@ def main() -> int:
         return 1
 
     # Load .env (secrets) and configure W&B before any training imports
+    from src.config import load_config
     from src.utils.env import load_env, setup_wandb
 
     load_env()

@@ -1,0 +1,21 @@
+# Latent Generation Experiment
+# Defaults live in src/config.py — only overrides belong here.
+# word_count_constraints and text_word_count are derived from scale_lengths.
+
+scale_lengths: [2, 4, 8, 16, 32]  # [z_4, z_3, z_2, z_1, text]
+
+wandb:
+  group: "latent-generation"
+  tags: ["qwen3-4b"]
+
+sft:
+  prompt_data: "data/prompt_data/gpt-5-nano-2025-08-07/docs_0000010000/gemini-3-pro-7/latent-generation/sft.jsonl"
+
+generation:
+  model_path: "checkpoints/sft/global_step_292/huggingface"
+
+rl:
+  sft_rl:
+    model_path: "checkpoints/sft/global_step_292/huggingface"
+  c2f_finetune:
+    model_path: "checkpoints/decoder"
