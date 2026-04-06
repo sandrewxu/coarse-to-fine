@@ -144,6 +144,10 @@ def main() -> int:
 
     os.environ.pop("ROCR_VISIBLE_DEVICES", None)
 
+    _venv = os.environ.get("VIRTUAL_ENV") or str(Path(sys.executable).parent.parent)
+    os.environ["UV_NO_SYNC"] = "1"
+    os.environ["UV_PROJECT_ENVIRONMENT"] = _venv
+
     # ── Environment and W&B ─────────────────────────────────────────────────
     from src.utils.env import load_env, setup_wandb
 

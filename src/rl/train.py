@@ -159,7 +159,13 @@ def run_sft_rl(
     print("  Command:", " ".join(cmd))
 
     # Export config path for the reward manager
-    env = {**os.environ, "C2F_CONFIG_PATH": str(project_root / "config/experiments/latent_generation.yaml")}
+    _venv = os.environ.get("VIRTUAL_ENV") or str(Path(sys.executable).parent.parent)
+    env = {
+        **os.environ,
+        "C2F_CONFIG_PATH": str(project_root / "config/experiments/latent_generation.yaml"),
+        "UV_NO_SYNC": "1",
+        "UV_PROJECT_ENVIRONMENT": _venv,
+    }
     return subprocess.run(cmd, cwd=project_root, env=env).returncode
 
 
