@@ -10,8 +10,8 @@ from typing import Any
 
 from datasets import Dataset, load_dataset
 
-from src.data.schemas import BatchOutputItem, GenerationOutput, VerificationStats
-from src.verification.rule_based import RuleBasedVerifier
+from src.data.schemas import GenerationOutput, VerificationStats
+from src.verification import verify
 
 
 def load_prompts(config: dict[str, Any]) -> list[str]:
@@ -84,19 +84,18 @@ def verify_and_filter_outputs(
     Returns:
         Tuple of (filtered_prompts, filtered_outputs, stats).
     """
-    verifier = RuleBasedVerifier(config)
+    word_count_constraints = config["word_count_constraints"]
+    strict = config.get("verification", {}).get("strict_word_count", True)
     stats = VerificationStats()
 
     filtered_prompts = []
     filtered_outputs = []
 
     for i, (prompt, output) in enumerate(zip(prompts, outputs)):
-        item = BatchOutputItem(
-            custom_id=f"gen-{i:06d}",
-            content=output,
-            status_code=200,
+        result = verify(
+            output, word_count_constraints,
+            custom_id=f"gen-{i:06d}", strict_word_count=strict,
         )
-        result = verifier.verify(item)
 
         stats.total_processed += 1
         if result.passed:

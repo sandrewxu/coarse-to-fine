@@ -28,10 +28,9 @@ import torch
 from transformers import AutoTokenizer
 
 from src.c2f_training.tokenizer import load_or_train_space_tokenizer
-from src.data.schemas import BatchOutputItem
 from src.qwen3_joint.configuration import C2FConfig
 from src.qwen3_joint.modeling import C2FForCausalLM
-from src.verification.rule_based import RuleBasedVerifier
+from src.verification import verify as verify_layers
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
@@ -134,8 +133,8 @@ class C2FRewardManager:
             dataset_format=c2f_train_cfg.get("dataset_format", "sft"),
         )
 
-        # ── Rule-based verifier (format bonus + layer parsing) ───────────────
-        self.verifier = RuleBasedVerifier(self.config)
+        # ── Verification config ─────────────────────────────────────────────
+        self.strict_word_count = self.config.get("verification", {}).get("strict_word_count", True)
 
         # ── Token ID shortcuts ───────────────────────────────────────────────
         self.bos_id = (
@@ -171,12 +170,10 @@ class C2FRewardManager:
         if parsing or verification fails.
         """
         cleaned = self._strip_think(response)
-        item = BatchOutputItem(
-            custom_id="reward-compute",
-            content=cleaned,
-            status_code=200,
+        result = verify_layers(
+            cleaned, self.word_count_constraints,
+            strict_word_count=self.strict_word_count,
         )
-        result = self.verifier.verify(item)
         if not result.passed:
             return None
         return [layer.content for layer in result.layers]
@@ -189,12 +186,10 @@ class C2FRewardManager:
         credit proportional to the number of correctly-sized layers otherwise.
         """
         cleaned = self._strip_think(response)
-        item = BatchOutputItem(
-            custom_id="format-bonus",
-            content=cleaned,
-            status_code=200,
+        result = verify_layers(
+            cleaned, self.word_count_constraints,
+            strict_word_count=self.strict_word_count,
         )
-        result = self.verifier.verify(item)
         if result.passed:
             return self.format_bonus_weight
 

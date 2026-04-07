@@ -1,48 +1,8 @@
 """
-Data schemas for batch processing, verification, and training dataset creation.
+Data schemas for training dataset creation.
 """
 from typing import Any, Optional
 from pydantic import BaseModel, Field
-
-
-class LatentLayerOutput(BaseModel):
-    """Single latent layer (z_n) output."""
-    layer_name: str = Field(..., description="Layer identifier (e.g., 'z_4', 'z_3')")
-    content: str = Field(..., description="Text content of the layer (without z_n: prefix)")
-    word_count: int = Field(..., description="Number of words in the content")
-    
-    @property
-    def layer_index(self) -> int:
-        """Extract numeric index from layer name (z_4 -> 4)."""
-        return int(self.layer_name.split('_')[1])
-
-
-class BatchOutputItem(BaseModel):
-    """Parsed batch API response item."""
-    custom_id: str = Field(..., description="Unique request identifier")
-    content: str = Field(..., description="Raw completion content from API")
-    status_code: Optional[int] = Field(None, description="HTTP status code")
-    error: Optional[dict] = Field(None, description="Error details if request failed")
-    model: Optional[str] = Field(None, description="Model used for generation")
-    
-    @property
-    def has_error(self) -> bool:
-        """Check if the batch item has an error."""
-        return self.error is not None or (self.status_code and self.status_code != 200)
-
-
-class VerificationResult(BaseModel):
-    """Result of verification for a single batch output."""
-    custom_id: str = Field(..., description="Request identifier")
-    passed: bool = Field(..., description="Whether verification passed")
-    raw_content: str = Field("", description="Raw content preserving z_n: format")
-    layers: Optional[list[LatentLayerOutput]] = Field(None, description="Parsed layers if valid")
-    failure_reasons: list[str] = Field(default_factory=list, description="Reasons for failure")
-    
-    def add_failure_reason(self, reason: str):
-        """Add a failure reason to the list."""
-        self.failure_reasons.append(reason)
-        self.passed = False
 
 
 class TrainingExample(BaseModel):

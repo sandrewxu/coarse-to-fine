@@ -2,10 +2,6 @@
 """
 Verify batch API outputs and write veRL-compatible SFT parquet.
 
-Writes SFT data to config's sft.dataset_dir (default data/sft_dataset/train.parquet)
-with columns prompt (original text) and response (raw z_n: format latent layers).
-Saves verification stats to --output.
-
 Usage:
     python scripts/03_verify_outputs.py \
         --input data/batch_outputs/.../output.jsonl \
@@ -18,266 +14,180 @@ import json
 import sys
 from pathlib import Path
 
-# Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import load_config
-from src.data.schemas import BatchOutputItem, VerificationStats
+from src.data.schemas import VerificationStats
 from src.sft.dataset import create_and_save_dataset
-from src.verification.rule_based import RuleBasedVerifier
+from src.verification import VerificationResult, verify
 
 
-def extract_prompts_from_sft_jsonl(sft_jsonl_path: Path) -> dict[str, str]:
+# ---------------------------------------------------------------------------
+# Provider-specific extraction
+# ---------------------------------------------------------------------------
+
+def extract_openai_batch_line(line: str) -> tuple[str, str, str | None]:
     """
-    Extract original text prompts from sft.jsonl (OpenAI Batch API request format).
-
-    Each line has custom_id and body.messages. The last message with role 'user'
-    is the original 32-word document.
-
-    Args:
-        sft_jsonl_path: Path to sft.jsonl file
+    Extract (custom_id, content, error) from an OpenAI Batch API JSONL line.
 
     Returns:
-        Dict mapping custom_id -> original text prompt
+        Tuple of (custom_id, content, error_message_or_None)
+    """
+    data = json.loads(line)
+    custom_id = data.get("custom_id", "")
+    error = data.get("error")
+    response = data.get("response", {})
+    status_code = response.get("status_code")
+
+    if error or (status_code and status_code != 200):
+        err_msg = str(error) if error else f"status_code={status_code}"
+        return custom_id, "", err_msg
+
+    choices = response.get("body", {}).get("choices", [])
+    content = ""
+    if choices:
+        content = choices[0].get("message", {}).get("content", "")
+
+    return custom_id, content, None
+
+
+def extract_prompts_from_sft_jsonl(path: Path) -> dict[str, str]:
+    """
+    Extract original text prompts from sft.jsonl (OpenAI Batch API request format).
+    Returns dict mapping custom_id -> last user message content.
     """
     prompts = {}
-    with open(sft_jsonl_path, 'r') as f:
+    with open(path) as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             data = json.loads(line)
-            custom_id = data.get('custom_id', '')
-            messages = data.get('body', {}).get('messages', [])
-
-            # Find the last user message (the actual document to summarize)
-            prompt = ""
+            custom_id = data.get("custom_id", "")
+            messages = data.get("body", {}).get("messages", [])
             for msg in reversed(messages):
-                if msg.get('role') == 'user':
-                    prompt = msg.get('content', '')
+                if msg.get("role") == "user":
+                    prompts[custom_id] = msg.get("content", "")
                     break
-
-            prompts[custom_id] = prompt
-
     return prompts
 
 
-def parse_batch_output_line(line: str) -> BatchOutputItem | None:
-    """
-    Parse a single JSONL line into a BatchOutputItem.
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-    Args:
-        line: JSON string from output.jsonl
+def main():
+    parser = argparse.ArgumentParser(
+        description="Verify batch outputs and create training dataset"
+    )
+    parser.add_argument("--input", required=True, type=Path, help="Batch output JSONL file")
+    parser.add_argument("--config", required=True, type=Path, help="Experiment config YAML")
+    parser.add_argument("--prompts", type=Path, default=None, help="sft.jsonl with original prompts")
+    parser.add_argument("--output", type=Path, default=None, help="Output dir for verification stats")
+    args = parser.parse_args()
 
-    Returns:
-        BatchOutputItem or None if parsing failed
-    """
-    try:
-        data = json.loads(line)
+    if not args.input.exists():
+        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
 
-        # Extract relevant fields from nested structure
-        custom_id = data.get('custom_id', '')
-        response = data.get('response', {})
-        error = data.get('error')
+    # Load config
+    config = load_config(args.config)
+    word_count_constraints = config["word_count_constraints"]
+    strict = config.get("verification", {}).get("strict_word_count", True)
+    provider = config.get("batch", {}).get("provider", "openai")
 
-        # Extract content from response body
-        status_code = response.get('status_code')
-        body = response.get('body', {})
-        choices = body.get('choices', [])
+    if provider != "openai":
+        print(f"Error: Unsupported provider '{provider}'. Only 'openai' is supported.", file=sys.stderr)
+        sys.exit(1)
 
-        if choices and len(choices) > 0:
-            message = choices[0].get('message', {})
-            content = message.get('content', '')
-        else:
-            content = ''
+    output_dir = Path(args.output or config.get("dataset", {}).get("output_dir", "data/verified/output"))
 
-        model = body.get('model')
+    # Load prompts
+    prompts_path = args.prompts
+    if prompts_path is None:
+        p = config.get("sft", {}).get("prompt_data")
+        if p:
+            prompts_path = Path(p)
+            if not prompts_path.is_absolute():
+                prompts_path = Path(__file__).resolve().parent.parent / prompts_path
 
-        return BatchOutputItem(
-            custom_id=custom_id,
-            content=content,
-            status_code=status_code,
-            error=error,
-            model=model,
-        )
-    except Exception as e:
-        print(f"Error parsing line: {e}", file=sys.stderr)
-        return None
+    prompts_by_id: dict[str, str] = {}
+    if prompts_path and prompts_path.exists():
+        print(f"Loading prompts from {prompts_path}...")
+        prompts_by_id = extract_prompts_from_sft_jsonl(prompts_path)
+        print(f"  Found {len(prompts_by_id)} prompts")
+    else:
+        print("Warning: No prompts file found; prompt column will be empty.", file=sys.stderr)
 
+    # Process and verify
+    print(f"Processing {args.input}...")
+    stats = VerificationStats()
+    results: list[VerificationResult] = []
 
-def process_batch_file(
-    input_path: Path,
-    verifier: RuleBasedVerifier,
-    stats: VerificationStats,
-) -> list:
-    """
-    Process batch output file line by line.
-
-    Args:
-        input_path: Path to output.jsonl file
-        verifier: Configured verifier instance
-        stats: Statistics tracker
-
-    Returns:
-        List of verification results
-    """
-    results = []
-
-    print(f"Processing {input_path}...")
-    with open(input_path, 'r') as f:
+    with open(args.input) as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
 
-            # Parse batch output
-            item = parse_batch_output_line(line)
-            if item is None:
-                print(f"Warning: Failed to parse line {line_num}", file=sys.stderr)
+            try:
+                custom_id, content, error = extract_openai_batch_line(line)
+            except Exception as e:
+                print(f"Warning: Failed to parse line {line_num}: {e}", file=sys.stderr)
                 continue
 
-            # Verify
-            result = verifier.verify(item)
-            results.append(result)
-
-            # Update statistics
             stats.total_processed += 1
+
+            if error:
+                result = VerificationResult(custom_id=custom_id, passed=False, raw_content="")
+                result.fail(f"API error: {error}")
+            else:
+                result = verify(content, word_count_constraints, custom_id=custom_id, strict_word_count=strict)
+
+            results.append(result)
             if result.passed:
                 stats.record_pass()
             else:
                 for reason in result.failure_reasons:
                     stats.record_failure(reason)
 
-            # Progress indicator
             if line_num % 1000 == 0:
-                print(f"  Processed {line_num} lines... ({stats.passed} passed, {stats.failed} failed)")
+                print(f"  {line_num} lines... ({stats.passed} passed, {stats.failed} failed)")
 
-    return results
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Verify batch outputs and create training dataset"
-    )
-    parser.add_argument(
-        '--input',
-        required=True,
-        type=Path,
-        help="Path to batch output JSONL file"
-    )
-    parser.add_argument(
-        '--config',
-        required=True,
-        type=Path,
-        help="Path to experiment configuration YAML"
-    )
-    parser.add_argument(
-        '--prompts',
-        type=Path,
-        default=None,
-        help="Path to sft.jsonl with original prompts (extracts last user message per custom_id)"
-    )
-    parser.add_argument(
-        '--output',
-        type=Path,
-        default=None,
-        help="Output directory for verification stats (overrides config)"
-    )
-    parser.add_argument(
-        '--batch-id',
-        type=str,
-        default=None,
-        help="Batch identifier for tracking"
-    )
-
-    args = parser.parse_args()
-
-    # Validate input file
-    if not args.input.exists():
-        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
-        sys.exit(1)
-
-    # Load configuration
-    print(f"Loading configuration from {args.config}...")
-    config = load_config(args.config)
-
-    # Determine output directory
-    output_dir = args.output or config.get('dataset', {}).get('output_dir', 'data/verified/output')
-    output_path = Path(output_dir)
-
-    # Extract batch_id from path if not provided
-    batch_id = args.batch_id
-    if batch_id is None:
-        # Try to extract from path (e.g., batch_6971db0456e081908c39483dd5230333)
-        for part in args.input.parts:
-            if part.startswith('batch_'):
-                batch_id = part
-                break
-
-    # Load prompts from sft.jsonl if provided, else try config path
-    prompts_by_id = None
-    prompts_path = args.prompts
-    if prompts_path is None:
-        # Check config for sft.prompt_data
-        prompts_path_str = config.get('sft', {}).get('prompt_data')
-        if prompts_path_str:
-            prompts_path = Path(prompts_path_str)
-            if not prompts_path.is_absolute():
-                prompts_path = Path(__file__).resolve().parent.parent / prompts_path
-
-    if prompts_path and prompts_path.exists():
-        print(f"Extracting prompts from {prompts_path}...")
-        prompts_by_id = extract_prompts_from_sft_jsonl(prompts_path)
-        print(f"  Found {len(prompts_by_id)} prompts")
-    else:
-        if prompts_path:
-            print(f"Warning: Prompts file not found: {prompts_path}", file=sys.stderr)
-        print("Warning: No prompts provided; prompt column will be empty.", file=sys.stderr)
-
-    # Initialize verifier
-    print("Initializing verifier...")
-    verifier = RuleBasedVerifier(config)
-
-    # Process batch file
-    stats = VerificationStats()
-    results = process_batch_file(args.input, verifier, stats)
-
-    # Print statistics
-    print("\n" + "=" * 60)
+    # Report
+    print(f"\n{'=' * 60}")
     print(stats)
-    print("=" * 60 + "\n")
+    print(f"{'=' * 60}\n")
 
-    # Create and save SFT dataset (veRL-compatible parquet) to sft.dataset_dir
-    if stats.passed > 0:
-        sft_dataset_dir = config.get("sft", {}).get("dataset_dir", "data/sft_dataset")
-        sft_output = Path(sft_dataset_dir) if Path(sft_dataset_dir).is_absolute() else Path(__file__).resolve().parent.parent / sft_dataset_dir
-        print(f"Creating SFT parquet from {stats.passed} verified outputs...")
-        dataset, saved_path = create_and_save_dataset(
-            verified_results=results,
-            output_dir=sft_output,
-            prompts_by_id=prompts_by_id,
-        )
-        print(f"  SFT dataset saved to: {saved_path}")
-        print(f"  Dataset size: {len(dataset)} examples (columns: {dataset.column_names})")
-
-        # Save verification statistics to verification output dir
-        stats_path = output_path / "verification_stats.json"
-        stats_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(stats_path, 'w') as f:
-            json.dump({
-                'total_processed': stats.total_processed,
-                'passed': stats.passed,
-                'failed': stats.failed,
-                'pass_rate': stats.pass_rate,
-                'failure_breakdown': stats.failure_breakdown,
-            }, f, indent=2)
-        print(f"  Statistics saved to: {stats_path}")
-    else:
-        print("Warning: No outputs passed verification. Dataset not created.", file=sys.stderr)
+    if stats.passed == 0:
+        print("Error: No outputs passed verification.", file=sys.stderr)
         sys.exit(1)
 
+    # Save SFT dataset
+    sft_dir = config.get("sft", {}).get("dataset_dir", "data/sft_dataset")
+    sft_output = Path(sft_dir) if Path(sft_dir).is_absolute() else Path(__file__).resolve().parent.parent / sft_dir
+    print(f"Creating SFT parquet from {stats.passed} verified outputs...")
+    dataset, saved_path = create_and_save_dataset(
+        verified_results=results,
+        output_dir=sft_output,
+        prompts_by_id=prompts_by_id,
+    )
+    print(f"  Saved to: {saved_path} ({len(dataset)} examples)")
+
+    # Save stats
+    stats_path = output_dir / "verification_stats.json"
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(stats_path, "w") as f:
+        json.dump({
+            "total_processed": stats.total_processed,
+            "passed": stats.passed,
+            "failed": stats.failed,
+            "pass_rate": stats.pass_rate,
+            "failure_breakdown": stats.failure_breakdown,
+        }, f, indent=2)
+    print(f"  Stats saved to: {stats_path}")
     print("\nDone!")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

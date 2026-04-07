@@ -10,7 +10,8 @@ from typing import Optional
 
 from datasets import Dataset
 
-from src.data.schemas import TrainingExample, VerificationResult
+from src.data.schemas import TrainingExample
+from src.verification import VerificationResult
 
 
 def create_training_dataset(

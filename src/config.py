@@ -40,6 +40,10 @@ class VerificationConfig(BaseModel):
     check_layer_order: bool = True
 
 
+class BatchConfig(BaseModel):
+    provider: str = "openai"
+
+
 class DatasetConfig(BaseModel):
     output_dir: str = "data/verified/latent_generation_10k_v1"
 
@@ -158,6 +162,7 @@ class ExperimentConfig(BaseModel):
     seed: int = 42
 
     wandb: WandbConfig = Field(default_factory=WandbConfig)
+    batch: BatchConfig = Field(default_factory=BatchConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     sft: SftConfig = Field(default_factory=SftConfig)
