@@ -34,7 +34,11 @@ NUM_GPUS=${NUM_GPUS:-1}
 
 if [ "$NUM_GPUS" -gt 1 ]; then
   accelerate launch --num_processes="$NUM_GPUS" \
-    scripts/06_train_decoder.py --config config/latent_generation.yaml
+    scripts/06_train_decoder.py \
+    --data data/sft_dataset/train.parquet \
+    --config config/latent_generation.yaml
 else
-  python scripts/06_train_decoder.py --config config/latent_generation.yaml
+  python scripts/06_train_decoder.py \
+    --data data/sft_dataset/train.parquet \
+    --config config/latent_generation.yaml
 fi
