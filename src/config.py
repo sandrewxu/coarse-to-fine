@@ -55,7 +55,7 @@ class DataPrepConfig(BaseModel):
     dataset: str = "tinystoriesv2"
     memory_gb: float = 8.0
     seed: int = 42
-    num_chunks: int = 4
+    num_chunks: int = 8
     words_per_chunk: int = 32
     k_validation: int = 5000
     k_test: int = 5000
@@ -68,7 +68,7 @@ class DatasetConfig(BaseModel):
     output_dir: str = "data/verified/latent_generation_10k_v1"
     data_dir: str = "data/tinystoriesv2_shuffled"
     dataset_name: str = "tinystoriesv2"
-    num_chunks: int = 4
+    num_chunks: int = 8
     # Split filenames (relative to data_dir).
     # Named *_split to distinguish from sft.prompt_data (batch API request JSONL).
     val_split: str = "tinystoriesv2.val.jsonl"
@@ -96,6 +96,7 @@ class SftConfig(BaseModel):
 class GenerationConfig(BaseModel):
     model_path: str = ""
     output_dir: str = "data/local_generations"
+    chunks: list[int] = Field(default_factory=lambda: [0, 1, 2, 3])
     num_gpus: int = 1
     max_tokens: int = 256
     temperature: float = 0.7
@@ -108,7 +109,7 @@ class GenerationConfig(BaseModel):
 
 class C2FTrainingConfig(BaseModel):
     init_from: str = "random"
-    dataset_dir: str = "data/sft_dataset"
+    dataset_dir: str = "data/local_generations"
     dataset_format: str = "sft"
     tokenizer: str = "space"
     tokenizer_dir: str = "checkpoints/decoder/tokenizer"

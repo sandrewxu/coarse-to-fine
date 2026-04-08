@@ -74,53 +74,56 @@ def apply_overrides(
 
 def _prep_rl_parquet(config: dict[str, Any], project_root: Path) -> Path:
     """
-    Build the RL training parquet from the SFT parquet.
+    Build the RL training parquet from the RL split JSONL.
 
-    Copies the SFT parquet and adds two columns required by veRL GRPO:
-      - ``ground_truth``: copy of ``prompt`` (the original document), used by
-        the reward manager to run the C2F forward pass.
+    Reads raw documents from ``dataset.rl_split`` and creates a veRL GRPO
+    parquet with columns:
+      - ``prompt``: the raw document text (input to q_φ during rollout).
+      - ``ground_truth``: copy of ``prompt`` (used by the reward manager
+        to run the C2F forward pass).
       - ``data_source``: literal ``"latent_generation"``.
 
     Returns:
         Path to the saved RL parquet (skips regeneration if it already exists).
     """
-    from datasets import load_dataset, Dataset
+    from datasets import Dataset
 
     rl_sft_cfg = config["rl"]["sft_rl"]
-    sft_dataset_dir = Path(config.get("sft", {}).get("dataset_dir", "data/sft_dataset"))
-    if not sft_dataset_dir.is_absolute():
-        sft_dataset_dir = project_root / sft_dataset_dir
 
     rl_dataset_dir = Path(rl_sft_cfg.get("dataset_dir", "data/rl_dataset"))
     if not rl_dataset_dir.is_absolute():
         rl_dataset_dir = project_root / rl_dataset_dir
     rl_dataset_dir.mkdir(parents=True, exist_ok=True)
 
-    sft_parquet = sft_dataset_dir / "train.parquet"
     rl_parquet = rl_dataset_dir / "sft_rl.parquet"
 
     if rl_parquet.exists():
         print(f"  RL parquet already exists: {rl_parquet}")
         return rl_parquet
 
-    if not sft_parquet.exists():
+    # Load raw documents from the RL split
+    dataset_cfg = config.get("dataset", {})
+    data_dir = Path(dataset_cfg.get("data_dir", "data/tinystoriesv2_shuffled"))
+    if not data_dir.is_absolute():
+        data_dir = project_root / data_dir
+    rl_split_file = data_dir / dataset_cfg.get("rl_split", "tinystoriesv2.rl.jsonl")
+
+    if not rl_split_file.exists():
         raise FileNotFoundError(
-            f"SFT parquet not found: {sft_parquet}\n"
-            "Run step 3 (03_verify_outputs.py) first."
+            f"RL split not found: {rl_split_file}\n"
+            "Run step 0 (00_prepare_data.py) first."
         )
 
-    print(f"  Preparing RL parquet from {sft_parquet}...")
-    ds = load_dataset("parquet", data_files=str(sft_parquet), split="train")
+    from src.generation.dataset import load_documents_from_jsonl
 
-    def _add_rl_columns(row):
-        return {
-            "prompt": row["prompt"],
-            "response": row["response"],
-            "ground_truth": row["prompt"],
-            "data_source": "latent_generation",
-        }
+    print(f"  Preparing RL parquet from {rl_split_file}...")
+    docs = load_documents_from_jsonl([rl_split_file])
 
-    ds = ds.map(_add_rl_columns, remove_columns=ds.column_names)
+    records = [
+        {"prompt": doc, "ground_truth": doc, "data_source": "latent_generation"}
+        for doc in docs
+    ]
+    ds = Dataset.from_list(records)
     ds.to_parquet(str(rl_parquet))
     print(f"  Saved RL parquet: {rl_parquet} ({len(ds):,} samples)")
     return rl_parquet

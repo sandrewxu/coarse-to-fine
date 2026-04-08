@@ -3,6 +3,7 @@ Data utilities for step 5 (local latent generation).
 
 Loading prompts, saving outputs, verification, and C2F flattening.
 """
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,41 @@ def load_prompts(parquet_path: str | Path) -> list[str]:
     """Load the 'prompt' column from a parquet file."""
     ds = load_dataset("parquet", data_files=str(parquet_path), split="train")
     return ds["prompt"]
+
+
+def load_documents_from_jsonl(paths: list[str | Path]) -> list[str]:
+    """Load raw documents from one or more JSONL/text files (e.g. chunk files).
+
+    Each non-empty line is read.  If the line is valid JSON with a ``text``
+    field, that field is used; otherwise the raw stripped line is used.
+    """
+    docs: list[str] = []
+    for path in paths:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    docs.append(data.get("text", line))
+                except json.JSONDecodeError:
+                    docs.append(line)
+    return docs
+
+
+def resolve_chunk_paths(
+    data_dir: str | Path,
+    dataset_name: str,
+    chunk_indices: list[int],
+) -> list[Path]:
+    """Build chunk file paths from dataset config and chunk indices."""
+    data_dir = Path(data_dir)
+    paths = []
+    for i in chunk_indices:
+        p = data_dir / f"{dataset_name}.chunk.{i:02d}.jsonl"
+        paths.append(p)
+    return paths
 
 
 def save_generation_outputs(

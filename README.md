@@ -219,14 +219,14 @@ All steps (0–7) correspond to numbered scripts in `scripts/`.
 Step 0   scripts/00_prepare_data.py
   Download HF dataset, preprocess, shuffle, split into chunks
   → data/tinystoriesv2_shuffled/
-      tinystoriesv2.chunk.{00-03}.jsonl   (training chunks for C2F)
-      tinystoriesv2.prompt.jsonl           (100k docs for batch API)
-      tinystoriesv2.val.jsonl              (20k validation)
-      tinystoriesv2.test.jsonl             (20k test)
-      tinystoriesv2.rl.jsonl               (32k reserved for RL)
+      tinystoriesv2.chunk.{00-07}.jsonl   (8 training chunks, ~3M docs each)
+      tinystoriesv2.prompt.jsonl           (200k docs for batch API)
+      tinystoriesv2.val.jsonl              (40k validation)
+      tinystoriesv2.test.jsonl             (40k test)
+      tinystoriesv2.rl.jsonl               (64k for RL training)
 
 Step 1   scripts/01_create_batch_requests.py
-  Format documents into OpenAI Batch API request JSONL
+  Format prompt-split documents into OpenAI Batch API request JSONL
   → data/prompt_data/{model}/docs_{N}/{user_prompt}/{system_prompt}/sft.jsonl
 
 Step 2   scripts/02_submit_batch.py
@@ -238,19 +238,19 @@ Step 3   scripts/03_verify_outputs.py
   → data/sft_dataset/train.parquet    [columns: prompt, response]
 
 Step 4   scripts/04_sft_train.py
-  SFT of Qwen3-4B as q_φ encoder (veRL + torchrun)
+  SFT of Qwen3-4B as q_φ encoder on batch API data (veRL + torchrun)
   → checkpoints/sft/
 
 Step 5   scripts/05_generate_local.py
-  Generate z ~ q_φ(z|x) via vLLM or HF, verify, flatten
+  Generate z ~ q_φ(z|x) from chunk files via vLLM, verify, flatten
   → data/local_generations/c2f_train.parquet
 
 Step 6   scripts/06_train_decoder.py
-  Pretrain C2FForCausalLM as p_θ joint model (HF Trainer + FSDP)
+  Pretrain C2FForCausalLM as p_θ on step 5 output (HF Trainer + FSDP)
   → checkpoints/decoder/
 
 Step 7   scripts/07_rl_train.py
-  ELBO optimisation — alternating GRPO + supervised fine-tuning
+  ELBO optimisation on RL split — alternating GRPO + supervised
   Phase A (sft):   GRPO on q_φ, p_θ frozen  → checkpoints/rl/sft/
   Phase B (c2f):   supervised p_θ, q_φ frozen → checkpoints/rl/c2f/
   Phase (joint):   simultaneous SFT + C2F (placeholder)
@@ -262,10 +262,10 @@ Step 7   scripts/07_rl_train.py
 | 1 | `01_create_batch_requests.py` | `--config` | `dataset.prompt_split` | `data/prompt_data/.../sft.jsonl` |
 | 2 | `02_submit_batch.py` | `--input` | Step 1 sft.jsonl | `data/batch_outputs/.../output.jsonl` |
 | 3 | `03_verify_outputs.py` | `--input`, `--config` | `output.jsonl`, `sft.jsonl` | `data/sft_dataset/train.parquet` |
-| 4 | `04_sft_train.py` | `--data` | `train.parquet` | `checkpoints/sft/` |
-| 5 | `05_generate_local.py` | `--data`, `--model`, `--output-dir` | `train.parquet`, SFT checkpoint | `data/local_generations/` |
-| 6 | `06_train_decoder.py` | `--data` | `train.parquet` or `c2f_train.parquet` | `checkpoints/decoder/` |
-| 7 | `07_rl_train.py` | `--phase`, `--config` | SFT + C2F checkpoints | `checkpoints/rl/` |
+| 4 | `04_sft_train.py` | `--data` | `train.parquet` (batch API data) | `checkpoints/sft/` |
+| 5 | `05_generate_local.py` | `--chunks`, `--config` | Chunk JSONL files, SFT checkpoint | `data/local_generations/c2f_train.parquet` |
+| 6 | `06_train_decoder.py` | `--data` | `c2f_train.parquet` (step 5 output) | `checkpoints/decoder/` |
+| 7 | `07_rl_train.py` | `--phase`, `--config` | SFT + C2F checkpoints, RL split | `checkpoints/rl/` |
 
 ---
 
@@ -335,11 +335,11 @@ Output structure (default: `data/tinystoriesv2_shuffled/`):
 
 | File | Purpose | Size (default) |
 |---|---|---|
-| `tinystoriesv2.chunk.{00-03}.jsonl` | Training data shards (one per GPU) | ~3.1M docs each |
-| `tinystoriesv2.prompt.jsonl` | Documents for batch API generation | 100k (4 × 25k) |
-| `tinystoriesv2.val.jsonl` | Validation set | 20k (4 × 5k) |
-| `tinystoriesv2.test.jsonl` | Test set | 20k (4 × 5k) |
-| `tinystoriesv2.rl.jsonl` | Reserved for RL training | 32k (4 × 8k) |
+| `tinystoriesv2.chunk.{00-07}.jsonl` | Training data shards (for steps 5–6) | ~3M docs each |
+| `tinystoriesv2.prompt.jsonl` | Documents for batch API generation (step 1) | 200k (8 × 25k) |
+| `tinystoriesv2.val.jsonl` | Validation set | 40k (8 × 5k) |
+| `tinystoriesv2.test.jsonl` | Test set | 40k (8 × 5k) |
+| `tinystoriesv2.rl.jsonl` | Documents for RL training (step 7) | 64k (8 × 8k) |
 
 Split sizes are configurable via the `data_prep` config section (`k_prompt`, `k_validation`, `k_test`, `k_rl`).
 
@@ -458,64 +458,66 @@ SLURM: `scripts/slurm_04_sft.sh`.
 
 ### Step 5 — Generate Latents
 
-Generates latent outputs from the SFT model using vLLM (default) or HuggingFace.
+Runs the trained $q_\phi$ model on raw documents from **chunk files** to generate latent hierarchies. The `--chunks` argument selects which chunk indices to use (default: `[0, 1, 2, 3]` from config). Outputs are verified and flattened for C2F training.
 
 ```bash
-# vLLM backend (fast, batched):
+# Generate from chunks 0-3 (default), using config for model path and sampling:
+python scripts/05_generate_local.py \
+  --chunks 0 1 2 3 \
+  --config config/latent_generation.yaml
+
+# Use all chunks for config defaults:
+python scripts/05_generate_local.py \
+  --config config/latent_generation.yaml
+
+# Subset of samples for testing:
+python scripts/05_generate_local.py \
+  --chunks 0 \
+  --config config/latent_generation.yaml \
+  --num-samples 1000
+
+# Backward compat — generate from a parquet file:
 python scripts/05_generate_local.py \
   --data data/sft_dataset/train.parquet \
   --model checkpoints/sft/global_step_292/huggingface \
   --output-dir data/local_generations
-
-# HuggingFace backend (simple, no vLLM dependency):
-python scripts/05_generate_local.py \
-  --data data/sft_dataset/train.parquet \
-  --model checkpoints/sft/global_step_292/huggingface \
-  --output-dir data/local_generations \
-  --backend hf
-
-# With config for sampling params and verification:
-python scripts/05_generate_local.py \
-  --data data/sft_dataset/train.parquet \
-  --model checkpoints/sft/global_step_292/huggingface \
-  --output-dir data/local_generations \
-  --config config/latent_generation.yaml \
-  --num-samples 1000
 ```
 
 Outputs: `generations.parquet` (raw) and `c2f_train.parquet` (flattened for C2F training, if config provided).
 
-SLURM: `scripts/slurm_05_generate.sh`.
+SLURM: `scripts/slurm_05_generate.sh`. Override chunks with `CHUNKS="0 1"`.
 
 ---
 
 ### Step 6 — Pretrain C2F Joint Model
 
-Trains $p_\theta$ (`C2FForCausalLM`) on latent+text sequences using HF Trainer with optional FSDP. Dataset format is auto-detected from parquet columns (`text` = c2f, `prompt`+`response` = sft).
+Trains $p_\theta$ (`C2FForCausalLM`) on the **step 5 output** (`c2f_train.parquet`) using HF Trainer with optional FSDP. Dataset format is auto-detected from parquet columns (`text` = c2f, `prompt`+`response` = sft).
 
 ```bash
-# Minimal — random init, all defaults:
-python scripts/06_train_decoder.py --data data/sft_dataset/train.parquet
-
-# Init from pretrained, with config:
+# Train on step 5 output (default):
 python scripts/06_train_decoder.py \
-  --data data/sft_dataset/train.parquet \
+  --data data/local_generations/c2f_train.parquet \
+  --config config/latent_generation.yaml
+
+# Init from pretrained weights:
+python scripts/06_train_decoder.py \
+  --data data/local_generations/c2f_train.parquet \
   --init-from Qwen/Qwen3-4B \
   --config config/latent_generation.yaml
 
 # Override training hyperparams from CLI:
 python scripts/06_train_decoder.py \
-  --data data/sft_dataset/train.parquet \
+  --data data/local_generations/c2f_train.parquet \
   --epochs 5 --lr 1e-4 --batch-size 16
 
 # Multi-GPU with FSDP:
 accelerate launch --num_processes=4 scripts/06_train_decoder.py \
-  --data data/sft_dataset/train.parquet \
+  --data data/local_generations/c2f_train.parquet \
   --config config/latent_generation.yaml
 
 # Resume from checkpoint:
 python scripts/06_train_decoder.py \
-  --data data/sft_dataset/train.parquet \
+  --data data/local_generations/c2f_train.parquet \
   --resume-from checkpoints/decoder/checkpoint-500
 ```
 
@@ -525,7 +527,7 @@ SLURM: `scripts/slurm_06_pretrain.sh`.
 
 ### Step 7 — ELBO Optimisation
 
-Alternates Phase A (GRPO on $q_\phi$) and Phase B (supervised on $p_\theta$). Each phase can be run independently or both sequentially. A "joint" phase (simultaneous SFT + C2F training) is available as a placeholder for future development.
+Alternates Phase A (GRPO on $q_\phi$) and Phase B (supervised on $p_\theta$), using the **RL split** (`dataset.rl_split`) as the document pool — a separate held-out set from the data used in steps 5–6. Each phase can be run independently or both sequentially.
 
 ```bash
 # Phase A only — GRPO on q_φ (C2F frozen):

@@ -3,23 +3,22 @@
 Generate latent outputs from the SFT-finetuned model.
 
 Usage:
+    # Generate from chunk files (raw documents):
+    python scripts/05_generate_local.py \
+        --chunks 0 1 2 3 \
+        --model checkpoints/sft/global_step_292/huggingface \
+        --config config/latent_generation.yaml
+
+    # Generate from a parquet file (backward compat):
     python scripts/05_generate_local.py \
         --data data/sft_dataset/train.parquet \
         --model checkpoints/sft/global_step_292/huggingface \
         --output-dir data/local_generations
 
-    # Use HuggingFace backend instead of vLLM:
+    # Subset of samples:
     python scripts/05_generate_local.py \
-        --data data/sft_dataset/train.parquet \
+        --chunks 0 \
         --model checkpoints/sft/global_step_292/huggingface \
-        --output-dir data/local_generations \
-        --backend hf
-
-    # With config for sampling params, verification, and W&B:
-    python scripts/05_generate_local.py \
-        --data data/sft_dataset/train.parquet \
-        --model checkpoints/sft/global_step_292/huggingface \
-        --output-dir data/local_generations \
         --config config/latent_generation.yaml \
         --num-samples 1000
 """
@@ -33,22 +32,24 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate latent outputs from SFT model")
-    parser.add_argument("--data", required=True, type=Path, help="Parquet file with 'prompt' column")
-    parser.add_argument("--model", required=True, type=str, help="SFT model checkpoint path")
-    parser.add_argument("--output-dir", required=True, type=Path, help="Output directory for results")
+    # Data source: --chunks (from dataset config) or --data (explicit parquet)
+    data_group = parser.add_mutually_exclusive_group()
+    data_group.add_argument("--chunks", type=int, nargs="+", default=None,
+                            help="Chunk indices to generate from (e.g. 0 1 2 3)")
+    data_group.add_argument("--data", type=Path, default=None,
+                            help="Parquet file with 'prompt' column (backward compat)")
+    parser.add_argument("--model", type=str, default=None, help="SFT model checkpoint path")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Output directory for results")
     parser.add_argument("--backend", default="vllm", choices=["vllm", "hf"], help="Generation backend (default: vllm)")
     parser.add_argument("--num-gpus", type=int, default=1, help="Number of GPUs (vLLM tensor parallel)")
     parser.add_argument("--num-samples", type=int, default=None, help="Generate for first N prompts only")
     parser.add_argument("--config", type=Path, default=None, help="Experiment YAML for sampling params, verification, W&B")
     args = parser.parse_args()
 
-    if not args.data.exists():
-        print(f"Error: Data file not found: {args.data}", file=sys.stderr)
-        return 1
-
     # Load config for defaults (or use empty)
     config = {}
     gen_config = {}
+    dataset_config = {}
     wandb_enabled = False
 
     if args.config:
@@ -57,12 +58,49 @@ def main() -> int:
         load_env()
         config = load_config(args.config)
         gen_config = config.get("generation", {})
+        dataset_config = config.get("dataset", {})
         wandb_enabled = setup_wandb(config, step_name="generation")
 
-    # Load prompts
-    from src.generation.dataset import load_prompts
-    print(f"Loading prompts from {args.data}...")
-    prompts = load_prompts(args.data)
+    # Resolve model path
+    model_path = args.model or gen_config.get("model_path", "")
+    if not model_path:
+        print("Error: --model is required (or set generation.model_path in config)", file=sys.stderr)
+        return 1
+
+    # Resolve output dir
+    output_dir = args.output_dir or Path(gen_config.get("output_dir", "data/local_generations"))
+    if not output_dir.is_absolute():
+        output_dir = PROJECT_ROOT / output_dir
+
+    # Load prompts from chunks or parquet
+    if args.data is not None:
+        # Backward compat: load from parquet
+        if not args.data.exists():
+            print(f"Error: Data file not found: {args.data}", file=sys.stderr)
+            return 1
+        from src.generation.dataset import load_prompts
+        print(f"Loading prompts from {args.data}...")
+        prompts = load_prompts(args.data)
+    else:
+        # Load from chunk files
+        chunk_indices = args.chunks or gen_config.get("chunks", [0, 1, 2, 3])
+        data_dir = dataset_config.get("data_dir", "data/tinystoriesv2_shuffled")
+        dataset_name = dataset_config.get("dataset_name", "tinystoriesv2")
+        if not Path(data_dir).is_absolute():
+            data_dir = str(PROJECT_ROOT / data_dir)
+
+        from src.generation.dataset import load_documents_from_jsonl, resolve_chunk_paths
+        chunk_paths = resolve_chunk_paths(data_dir, dataset_name, chunk_indices)
+
+        # Verify all chunk files exist
+        for p in chunk_paths:
+            if not p.exists():
+                print(f"Error: Chunk file not found: {p}", file=sys.stderr)
+                return 1
+
+        print(f"Loading documents from {len(chunk_paths)} chunks: {chunk_indices}...")
+        prompts = load_documents_from_jsonl(chunk_paths)
+
     if args.num_samples and args.num_samples < len(prompts):
         prompts = prompts[:args.num_samples]
     print(f"  {len(prompts)} prompts loaded")
@@ -85,12 +123,11 @@ def main() -> int:
     # Generate
     from src.generation.inference import generate
     print(f"Generating with {args.backend} backend ({len(prompts)} prompts)...")
-    outputs = generate(args.backend, args.model, prompts, **sampling_kwargs)
+    outputs = generate(args.backend, model_path, prompts, **sampling_kwargs)
     print(f"  Generated {len(outputs)} outputs")
 
     # Save raw outputs
     from src.generation.dataset import save_generation_outputs
-    output_dir = args.output_dir if args.output_dir.is_absolute() else PROJECT_ROOT / args.output_dir
     raw_path = save_generation_outputs(prompts, outputs, output_dir)
     print(f"  Raw generations saved to: {raw_path}")
 

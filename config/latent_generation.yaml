@@ -8,22 +8,23 @@ wandb:
   group: "latent-generation"
   tags: ["qwen3-4b"]
 
-# Step 00 output: data splits in data_dir
+# Step 00 output: data splits in data_dir (8 chunks on HPC)
 dataset:
   data_dir: "data/tinystoriesv2_shuffled"
   dataset_name: "tinystoriesv2"
 
 # Step 01 → 02 → 03: batch API pipeline
-# sft.prompt_data must match the output path from step 01 (01_create_batch_requests.py).
-# The path includes the doc count, which depends on the prompt_split file size.
+# sft.prompt_data must match the output path from step 01.
 # Update this after running step 01.
 sft:
   prompt_data: "data/prompt_data/gpt-5-nano-2025-08-07/docs_0000100000/gemini-3-pro-7/latent-generation/sft.jsonl"
 
-# Steps 05, 07: SFT checkpoint (set after running step 04)
+# Step 05: generate from chunks 0-3 (use remaining 4-7 for held-out eval)
 generation:
   model_path: "checkpoints/sft/global_step_292/huggingface"
+  chunks: [0, 1, 2, 3]
 
+# Step 07: RL checkpoints
 rl:
   sft_rl:
     model_path: "checkpoints/sft/global_step_292/huggingface"
