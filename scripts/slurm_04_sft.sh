@@ -11,9 +11,13 @@
 #SBATCH --error=logs/finetune/qwen3_4b_sft_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
 
-# Step 4: Supervised Fine-Tuning with veRL.
+# Step 4: Supervised Fine-Tuning with HuggingFace Trainer.
 # Requires: data/sft_dataset/train.parquet from step 3 (03_verify_outputs.py).
 # Config: config/latent_generation.yaml (sft section).
+#
+# For multi-GPU, change --gpus and NUM_GPUS below:
+#   #SBATCH --gpus=h100:2
+#   NUM_GPUS=2
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,6 +30,17 @@ if [ -d ".venv" ]; then
   source .venv/bin/activate
 fi
 
-python scripts/04_sft_train.py \
-  --data data/sft_dataset/train.parquet \
-  --config config/latent_generation.yaml
+NUM_GPUS=${NUM_GPUS:-1}
+
+if [ "$NUM_GPUS" -gt 1 ]; then
+  accelerate launch --num_processes="$NUM_GPUS" \
+    scripts/04_sft_train.py \
+    --data data/sft_dataset/train.parquet \
+    --config config/latent_generation.yaml \
+    "$@"
+else
+  python scripts/04_sft_train.py \
+    --data data/sft_dataset/train.parquet \
+    --config config/latent_generation.yaml \
+    "$@"
+fi
