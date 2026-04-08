@@ -36,8 +36,6 @@ class WandbConfig(BaseModel):
 
 class VerificationConfig(BaseModel):
     strict_word_count: bool = True
-    allow_extra_whitespace: bool = True
-    check_layer_order: bool = True
 
 
 class BatchConfig(BaseModel):
@@ -66,7 +64,6 @@ class SftConfig(BaseModel):
 
 class GenerationConfig(BaseModel):
     model_path: str = ""
-    prompt_dataset: str = "data/sft_dataset/train.parquet"
     output_dir: str = "data/local_generations"
     num_gpus: int = 1
     max_tokens: int = 256
@@ -76,11 +73,6 @@ class GenerationConfig(BaseModel):
     repetition_penalty: float = 1.0
     seed: int = 42
     verify_outputs: bool = True
-
-
-class FsdpConfig(BaseModel):
-    backward_prefetch: str = "backward_pre"
-    forward_prefetch: bool = True
 
 
 class C2FTrainingConfig(BaseModel):
@@ -104,7 +96,6 @@ class C2FTrainingConfig(BaseModel):
     eval_steps: int = 500
     eval_split: float = 0.05
     fsdp: str = "full_shard"
-    fsdp_config: FsdpConfig = Field(default_factory=FsdpConfig)
     report_to: str = "none"
     run_name: str = "c2f-pretrain"
     seed: int = 42

@@ -229,7 +229,7 @@ Step 4   scripts/04_sft_train.py
   → checkpoints/sft/
 
 Step 5   scripts/05_generate_local.py
-  vLLM generates z ~ q_φ(z|x) at scale, verify, flatten
+  Generate z ~ q_φ(z|x) via vLLM or HF, verify, flatten
   → data/local_generations/c2f_train.parquet
 
 Step 6   scripts/06_train_decoder.py
@@ -238,18 +238,18 @@ Step 6   scripts/06_train_decoder.py
 
 Step 7   scripts/07_rl_train.py
   ELBO optimisation — alternating GRPO + supervised fine-tuning
-  Phase A: GRPO on q_φ, p_θ frozen    → checkpoints/rl/sft/
-  Phase B: supervised p_θ, q_φ frozen → checkpoints/rl/c2f/
+  Phase A (sft):   GRPO on q_φ, p_θ frozen  → checkpoints/rl/sft/
+  Phase B (c2f):   supervised p_θ, q_φ frozen → checkpoints/rl/c2f/
+  Phase (joint):   simultaneous SFT + C2F (placeholder)
 ```
 
-| Step | Script | Key inputs | Output |
-|---|---|---|---|
-| 3 | `03_verify_outputs.py` | `batch_outputs/*.jsonl`, `sft.jsonl` | `data/sft_dataset/train.parquet` |
-| 4 | `04_sft_train.py` | `sft_dataset/train.parquet` | `checkpoints/sft/` |
-| 5 | `05_generate_local.py` | `checkpoints/sft/`, prompts | `data/local_generations/c2f_train.parquet` |
-| 6 | `06_train_decoder.py` | `c2f_train.parquet` or `train.parquet` | `checkpoints/decoder/` |
-| 7A | `07_rl_train.py --phase sft` | `checkpoints/sft/`, `checkpoints/decoder/` | `checkpoints/rl/sft/` |
-| 7B | `07_rl_train.py --phase c2f` | `checkpoints/rl/sft/`, `checkpoints/decoder/` | `checkpoints/rl/c2f/` |
+| Step | Script | Required args | Key inputs | Output |
+|---|---|---|---|---|
+| 3 | `03_verify_outputs.py` | `--input`, `--config` | `output.jsonl`, `sft.jsonl` | `data/sft_dataset/train.parquet` |
+| 4 | `04_sft_train.py` | `--data` | `train.parquet` | `checkpoints/sft/` |
+| 5 | `05_generate_local.py` | `--data`, `--model`, `--output-dir` | `train.parquet`, SFT checkpoint | `data/local_generations/` |
+| 6 | `06_train_decoder.py` | `--data` | `train.parquet` or `c2f_train.parquet` | `checkpoints/decoder/` |
+| 7 | `07_rl_train.py` | `--phase`, `--config` | SFT + C2F checkpoints | `checkpoints/rl/` |
 
 ---
 
@@ -319,35 +319,53 @@ Output: `data/sft_dataset/train.parquet` with columns `prompt` (32-word document
 Fine-tunes Qwen3-4B as $q_\phi$ on the verified parquet using veRL's FSDP SFT trainer.
 
 ```bash
-python scripts/04_sft_train.py --config config/latent_generation.yaml
+# Minimal — just point at data:
+python scripts/04_sft_train.py --data data/sft_dataset/train.parquet
 
-# Pass Hydra overrides directly to veRL:
+# With config for model/lr/batch/W&B defaults:
 python scripts/04_sft_train.py \
-  trainer.total_epochs=1 \
-  data.micro_batch_size_per_gpu=16
+  --data data/sft_dataset/train.parquet \
+  --config config/latent_generation.yaml
+
+# Override GPU count, pass Hydra overrides to veRL:
+python scripts/04_sft_train.py \
+  --data data/sft_dataset/train.parquet \
+  --num-gpus 2 \
+  trainer.total_epochs=1
 ```
 
-GPU count is set by `sft.num_gpus` in the config (1–4). SLURM: `scripts/slurm_04_sft.sh`.
+SLURM: `scripts/slurm_04_sft.sh`.
 
 ---
 
-### Step 5 — Generate Latents with vLLM
+### Step 5 — Generate Latents
 
-Runs the SFT model at scale using vLLM offline inference, verifies word counts, and flattens outputs for C2F training.
+Generates latent outputs from the SFT model using vLLM (default) or HuggingFace.
 
 ```bash
-python scripts/05_generate_local.py --config config/latent_generation.yaml
-
-# Limit samples or change output directory:
+# vLLM backend (fast, batched):
 python scripts/05_generate_local.py \
+  --data data/sft_dataset/train.parquet \
+  --model checkpoints/sft/global_step_292/huggingface \
+  --output-dir data/local_generations
+
+# HuggingFace backend (simple, no vLLM dependency):
+python scripts/05_generate_local.py \
+  --data data/sft_dataset/train.parquet \
+  --model checkpoints/sft/global_step_292/huggingface \
+  --output-dir data/local_generations \
+  --backend hf
+
+# With config for sampling params and verification:
+python scripts/05_generate_local.py \
+  --data data/sft_dataset/train.parquet \
+  --model checkpoints/sft/global_step_292/huggingface \
+  --output-dir data/local_generations \
   --config config/latent_generation.yaml \
-  --num-samples 100000 \
-  --output-dir data/local_generations/run2
+  --num-samples 1000
 ```
 
-Outputs:
-- `data/local_generations/generations.parquet` — raw model outputs
-- `data/local_generations/c2f_train.parquet` — flattened word sequences ready for step 6
+Outputs: `generations.parquet` (raw) and `c2f_train.parquet` (flattened for C2F training, if config provided).
 
 SLURM: `scripts/slurm_05_generate.sh`.
 
@@ -355,25 +373,33 @@ SLURM: `scripts/slurm_05_generate.sh`.
 
 ### Step 6 — Pretrain C2F Joint Model
 
-Trains $p_\theta$ (`C2FForCausalLM`) on the flattened latent+text sequences using HF Trainer with optional FSDP.
+Trains $p_\theta$ (`C2FForCausalLM`) on latent+text sequences using HF Trainer with optional FSDP. Dataset format is auto-detected from parquet columns (`text` = c2f, `prompt`+`response` = sft).
 
 ```bash
-# Single GPU:
-python scripts/06_train_decoder.py --config config/latent_generation.yaml
+# Minimal — random init, all defaults:
+python scripts/06_train_decoder.py --data data/sft_dataset/train.parquet
+
+# Init from pretrained, with config:
+python scripts/06_train_decoder.py \
+  --data data/sft_dataset/train.parquet \
+  --init-from Qwen/Qwen3-4B \
+  --config config/latent_generation.yaml
+
+# Override training hyperparams from CLI:
+python scripts/06_train_decoder.py \
+  --data data/sft_dataset/train.parquet \
+  --epochs 5 --lr 1e-4 --batch-size 16
 
 # Multi-GPU with FSDP:
 accelerate launch --num_processes=4 scripts/06_train_decoder.py \
+  --data data/sft_dataset/train.parquet \
   --config config/latent_generation.yaml
 
-# Resume from a checkpoint:
+# Resume from checkpoint:
 python scripts/06_train_decoder.py \
-  --config config/latent_generation.yaml \
+  --data data/sft_dataset/train.parquet \
   --resume-from checkpoints/decoder/checkpoint-500
 ```
-
-The `c2f_training.dataset_format` config key controls the input format:
-- `"c2f"` — flat word sequences from step 5 (`c2f_train.parquet`)
-- `"sft"` — prompt+response from step 3 (`train.parquet`), flattened on the fly
 
 SLURM: `scripts/slurm_06_pretrain.sh`.
 
@@ -381,54 +407,55 @@ SLURM: `scripts/slurm_06_pretrain.sh`.
 
 ### Step 7 — ELBO Optimisation
 
-Alternates Phase A (GRPO on $q_\phi$) and Phase B (supervised on $p_\theta$). Each phase can be run independently or both sequentially in one call.
+Alternates Phase A (GRPO on $q_\phi$) and Phase B (supervised on $p_\theta$). Each phase can be run independently or both sequentially. A "joint" phase (simultaneous SFT + C2F training) is available as a placeholder for future development.
 
 ```bash
 # Phase A only — GRPO on q_φ (C2F frozen):
-python scripts/07_rl_train.py --phase sft \
-  --config config/latent_generation.yaml
+python scripts/07_rl_train.py --phase sft --config config/latent_generation.yaml
 
 # Phase B only — supervised p_θ (SFT frozen):
-python scripts/07_rl_train.py --phase c2f \
-  --config config/latent_generation.yaml
+python scripts/07_rl_train.py --phase c2f --config config/latent_generation.yaml
 
-# One full round of alternation (Phase A then Phase B):
-python scripts/07_rl_train.py --phase both \
-  --config config/latent_generation.yaml
+# One full round (Phase A then Phase B):
+python scripts/07_rl_train.py --phase both --config config/latent_generation.yaml
+
+# Joint training (not yet implemented):
+python scripts/07_rl_train.py --phase joint --config config/latent_generation.yaml
 ```
 
-Dot-path overrides (e.g. `rl.sft_rl.epochs=1`) update the in-memory config and apply to the corresponding phase. Non-`rl.*` overrides are forwarded as Hydra overrides directly to the veRL trainer.
+Dot-path overrides (e.g. `rl.sft_rl.epochs=1`) update the in-memory config. Non-`rl.*` overrides are forwarded as Hydra overrides to the veRL trainer.
 
 ```bash
-# Smoke-test Phase A (small batch):
-python scripts/07_rl_train.py --phase sft \
-  --config config/latent_generation.yaml \
-  rl.sft_rl.epochs=1 rl.sft_rl.train_batch_size=8 rl.sft_rl.rollout_n=4
+# Smoke-test Phase A:
+python scripts/07_rl_train.py --phase sft --config config/latent_generation.yaml \
+  rl.sft_rl.epochs=1 rl.sft_rl.train_batch_size=8
 
-# Smoke-test Phase B (100 prompts, 1 epoch):
-python scripts/07_rl_train.py --phase c2f \
-  --config config/latent_generation.yaml \
+# Smoke-test Phase B:
+python scripts/07_rl_train.py --phase c2f --config config/latent_generation.yaml \
   rl.c2f_finetune.num_samples=100 rl.c2f_finetune.epochs=1
 ```
 
-SLURM: `scripts/slurm_07_rl.sh`. Set `PHASE=sft|c2f|both` before submitting.
+SLURM: `scripts/slurm_07_rl.sh`. Set `PHASE=sft|c2f|both|joint` before submitting.
 
 ---
 
 ## Configuration
 
-Defaults are defined in `src/config.py` (Pydantic schema); experiment-specific overrides go in `config/latent_generation.yaml`. Key sections:
+All defaults are defined in `src/config.py` (Pydantic schema). The YAML file only needs to specify overrides. Derived fields (`word_count_constraints`, `text_word_count`) are computed automatically from `scale_lengths`. Top-level `num_gpus` and `seed` propagate to all sections.
+
+Scripts 04, 05, and 06 work without a config file (using built-in defaults); scripts 03 and 07 require `--config` because they depend heavily on experiment-specific settings.
 
 | Section | Controls |
 |---|---|
-| `scale_lengths` | Token positions per scale `[2, 4, 8, 16, 32]`; determines `seq_len = 64` |
-| `word_count_constraints` | Exact word counts per latent layer (used by verifier and reward function) |
+| `scale_lengths` | Token counts per scale `[2, 4, 8, 16, 32]`; determines hierarchy and `seq_len = 64` |
 | `wandb` | W&B enable/disable, project, entity, group, tags, mode |
-| `sft` | Step 4: base model name, GPU count, batch size, LR, epochs |
-| `generation` | Step 5: SFT checkpoint path, vLLM tensor parallelism, sampling params |
-| `c2f_training` | Step 6: init source, tokenizer type, FSDP config, training hyperparams |
+| `batch` | Batch API provider (`openai`) — step 3 extraction format |
+| `verification` | `strict_word_count` — whether word counts must match exactly |
+| `sft` | Step 4: base model, batch size, LR, epochs, veRL-specific flags |
+| `generation` | Step 5: sampling params (temperature, top_p, top_k, max_tokens) |
+| `c2f_training` | Step 6: init source, tokenizer type, FSDP, full HF Trainer config |
 | `rl.sft_rl` | Step 7A: GRPO rollout group size, KL coefficient, format bonus weight |
-| `rl.c2f_finetune` | Step 7B: generation settings and C2F fine-tuning hyperparams |
+| `rl.c2f_finetune` | Step 7B: generation and C2F fine-tuning hyperparams |
 
 Key `rl.sft_rl` fields:
 
@@ -446,30 +473,34 @@ Key `rl.sft_rl` fields:
 ```
 coarse-to-fine/
 ├── config/
-│   └── experiments/
-│       └── latent_generation.yaml   # single config file for all steps
+│   └── latent_generation.yaml       # experiment config (overrides defaults in src/config.py)
 │
 ├── scripts/
-│   ├── 03_verify_outputs.py         # step 3 — verify + build SFT parquet
+│   ├── 03_verify_outputs.py         # step 3 — verify batch outputs → SFT parquet
 │   ├── 04_sft_train.py              # step 4 — veRL SFT via torchrun
-│   ├── 05_generate_local.py         # step 5 — vLLM generation + flatten
-│   ├── 06_train_decoder.py          # step 6 — C2F pretraining via HF Trainer
-│   ├── 07_rl_train.py               # step 7 — ELBO optimisation (GRPO + SFT)
+│   ├── 05_generate_local.py         # step 5 — generate via vLLM or HF, verify, flatten
+│   ├── 06_train_decoder.py          # step 6 — C2F pretraining via HF Trainer ± FSDP
+│   ├── 07_rl_train.py               # step 7 — ELBO optimisation (sft / c2f / both / joint)
 │   └── slurm_*.sh                   # SLURM job scripts for steps 4–7
 │
 ├── src/
-│   ├── batch/           step 2 — batch API client and polling
-│   ├── verification/    step 3 — RuleBasedVerifier, word-count checks
-│   ├── sft/             step 4 — veRL Hydra override builder
-│   ├── generation/      step 5 — LatentGenerator (vLLM), flatten_for_c2f
-│   ├── qwen3_joint/     C2F model architecture — C2FConfig, C2FForCausalLM
-│   ├── c2f_training/    step 6 — C2FDataset, C2FTrainer, space tokenizer
-│   ├── rl/              step 7 — C2FRewardManager, verl_config, train
-│   ├── data/            Pydantic schemas, sharding, utilities
-│   └── utils/           load_env, setup_wandb, logging, io
+│   ├── config.py            Pydantic config schema + loader (all defaults defined here)
+│   ├── verification/        step 3 — space-based verifier (z_N format + word counts)
+│   ├── sft/                 step 3–4 — SFT parquet creation (dataset.py)
+│   ├── generation/          step 5 — generate_vllm / generate_hf, prompt loading, flatten
+│   ├── qwen3_joint/         C2F model — C2FConfig, C2FForCausalLM, block-prefix attention
+│   ├── c2f_training/        step 6 — C2FDataset, C2FTrainer, space tokenizer
+│   ├── rl/                  step 7 — C2FRewardManager, GRPO config, train phases
+│   ├── data/                Pydantic schemas (TrainingExample, VerificationStats)
+│   └── utils/               load_env, setup_wandb
+│
+├── tests/
+│   ├── test_config.py               config loading, propagation, derived fields
+│   ├── test_verification.py         verifier logic (pass/fail, word counts, ordering)
+│   └── test_dataset.py              format detection, SFT dataset creation
 │
 ├── data/
-│   ├── batch_outputs/           raw batch API responses
+│   ├── batch_outputs/           raw batch API responses (upstream)
 │   ├── sft_dataset/             step 3 output  (train.parquet)
 │   ├── local_generations/       step 5 output  (c2f_train.parquet)
 │   └── rl_dataset/              step 7 data    (sft_rl.parquet, c2f_finetune/)
@@ -481,7 +512,7 @@ coarse-to-fine/
 │       ├── sft/                 q_φ after Phase A GRPO
 │       └── c2f/                 p_θ after Phase B supervised fine-tuning
 │
-├── pyproject.toml               optional-dep groups: sft, generation, c2f, rl
+├── pyproject.toml               dependencies + optional groups: sft, generation, c2f, rl
 └── .env.example                 template for WANDB_API_KEY, OPENAI_API_KEY, HF_TOKEN
 ```
 
