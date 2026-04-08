@@ -18,7 +18,8 @@
       "WebFetch(domain:deepwiki.com)",
       "mcp__ide__getDiagnostics",
       "Bash(python3:*)",
-      "Bash(source:*)"
+      "Bash(source:*)",
+      "Bash(uv run:*)"
     ]
   }
 }

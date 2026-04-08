@@ -40,10 +40,41 @@ class VerificationConfig(BaseModel):
 
 class BatchConfig(BaseModel):
     provider: str = "openai"
+    model: str = "gpt-5-nano-2025-08-07"
+    reasoning_effort: str = "low"
+    verbosity: str = "medium"
+    system_prompt: str = "latent-generation"
+    user_prompt: str = "gemini-3-pro-7"
+    few_shot_examples: str = "latent-generation"
+    run_tag: str = "latent_generation_10k_v1"
+    prompt_data_dir: str = "data/prompt_data"
+    output_dir: str = "data/batch_outputs"
+
+
+class DataPrepConfig(BaseModel):
+    dataset: str = "tinystoriesv2"
+    memory_gb: float = 8.0
+    seed: int = 42
+    num_chunks: int = 4
+    words_per_chunk: int = 32
+    k_validation: int = 5000
+    k_test: int = 5000
+    k_prompt: int = 25000
+    k_rl: int = 8000
+    raw_data_dir: str = "data"
 
 
 class DatasetConfig(BaseModel):
     output_dir: str = "data/verified/latent_generation_10k_v1"
+    data_dir: str = "data/tinystoriesv2_shuffled"
+    dataset_name: str = "tinystoriesv2"
+    num_chunks: int = 4
+    # Split filenames (relative to data_dir).
+    # Named *_split to distinguish from sft.prompt_data (batch API request JSONL).
+    val_split: str = "tinystoriesv2.val.jsonl"
+    test_split: str = "tinystoriesv2.test.jsonl"
+    prompt_split: str = "tinystoriesv2.prompt.jsonl"
+    rl_split: str = "tinystoriesv2.rl.jsonl"
 
 
 class SftConfig(BaseModel):
@@ -155,6 +186,7 @@ class ExperimentConfig(BaseModel):
     wandb: WandbConfig = Field(default_factory=WandbConfig)
     batch: BatchConfig = Field(default_factory=BatchConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+    data_prep: DataPrepConfig = Field(default_factory=DataPrepConfig)
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     sft: SftConfig = Field(default_factory=SftConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
@@ -185,6 +217,7 @@ _PROPAGATED_KEYS: list[tuple[str, ...]] = [
     ("rl", "sft_rl", "num_gpus"),
     ("rl", "c2f_finetune", "num_gpus"),
     # top-level seed → sections that have one
+    ("data_prep", "seed"),
     ("generation", "seed"),
     ("c2f_training", "seed"),
 ]

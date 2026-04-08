@@ -59,9 +59,9 @@ A VAE-like training objective (the ELBO) then jointly tightens the approximate p
 
 ### Phase 0 — Initialise $q_\phi$ and $p_\theta$
 
-**Step 1 — Synthetic latent generation (upstream, not in this repo)**
+**Step 1 — Synthetic latent generation (scripts/00–02)**
 
-For each document $x$ in the training corpus, use a strong prompted reasoning model (e.g. GPT-4o / R1) to generate a coarse-to-fine hierarchy:
+For each document $x$ in the training corpus, use a strong prompted reasoning model (e.g. GPT-4o / R1) via the OpenAI Batch API to generate a coarse-to-fine hierarchy:
 
 $$z_T, z_{T-1}, \dots, z_1 \;\sim\; q_{\text{prompted}}(z \mid x)$$
 
@@ -213,12 +213,25 @@ A word-level tokenizer (one space-separated word = one token) is trained from th
 
 ## Pipeline Overview
 
-Steps 1–2 run upstream (not in this repo). Steps 3–7 correspond to files in `scripts/`.
+All steps (0–7) correspond to numbered scripts in `scripts/`.
 
 ```
-Steps 1–2 (upstream)
-  Corpus collection → Batch API latent generation (z_n: format)
-  → data/batch_outputs/
+Step 0   scripts/00_prepare_data.py
+  Download HF dataset, preprocess, shuffle, split into chunks
+  → data/tinystoriesv2_shuffled/
+      tinystoriesv2.chunk.{00-03}.jsonl   (training chunks for C2F)
+      tinystoriesv2.prompt.jsonl           (100k docs for batch API)
+      tinystoriesv2.val.jsonl              (20k validation)
+      tinystoriesv2.test.jsonl             (20k test)
+      tinystoriesv2.rl.jsonl               (32k reserved for RL)
+
+Step 1   scripts/01_create_batch_requests.py
+  Format documents into OpenAI Batch API request JSONL
+  → data/prompt_data/{model}/docs_{N}/{user_prompt}/{system_prompt}/sft.jsonl
+
+Step 2   scripts/02_submit_batch.py
+  Submit batch request, monitor, and download results
+  → data/batch_outputs/{metadata}/{batch_id}/output.jsonl
 
 Step 3   scripts/03_verify_outputs.py
   Verify z_n: format and exact word counts
@@ -245,6 +258,9 @@ Step 7   scripts/07_rl_train.py
 
 | Step | Script | Required args | Key inputs | Output |
 |---|---|---|---|---|
+| 0 | `00_prepare_data.py` | `--dataset` | HuggingFace dataset | `data/{dataset}_shuffled/` |
+| 1 | `01_create_batch_requests.py` | `--config` | `dataset.prompt_split` | `data/prompt_data/.../sft.jsonl` |
+| 2 | `02_submit_batch.py` | `--input` | Step 1 sft.jsonl | `data/batch_outputs/.../output.jsonl` |
 | 3 | `03_verify_outputs.py` | `--input`, `--config` | `output.jsonl`, `sft.jsonl` | `data/sft_dataset/train.parquet` |
 | 4 | `04_sft_train.py` | `--data` | `train.parquet` | `checkpoints/sft/` |
 | 5 | `05_generate_local.py` | `--data`, `--model`, `--output-dir` | `train.parquet`, SFT checkpoint | `data/local_generations/` |
@@ -285,7 +301,7 @@ WANDB_API_KEY=your-key-here
 WANDB_PROJECT=coarse-to-fine
 WANDB_ENTITY=your-entity
 
-# Batch API — steps 1–2 (upstream)
+# Batch API — steps 1–2
 OPENAI_API_KEY=sk-...
 
 # Gated HF models (Qwen3)
@@ -297,6 +313,108 @@ HF_TOKEN=hf_...
 ---
 
 ## Running the Pipeline
+
+### Step 0 — Prepare Data
+
+Downloads a HuggingFace dataset, preprocesses it (for TinyStories: splits on `<|endoftext|>` and chunks into 32-word documents), shuffles with [terashuf](https://github.com/alexandres/terashuf), and splits into sharded training chunks plus dedicated validation, test, prompt, and RL splits.
+
+```bash
+# Default: TinyStories → 4 chunks + val/test/prompt/rl splits
+python scripts/00_prepare_data.py --dataset tinystoriesv2 --memory 8
+
+# With config for split sizes and seed:
+python scripts/00_prepare_data.py \
+  --dataset tinystoriesv2 \
+  --config config/latent_generation.yaml
+
+# Different dataset:
+python scripts/00_prepare_data.py --dataset fineweb_edu_10bt --memory 32 --data-dir /scratch/data
+```
+
+Output structure (default: `data/tinystoriesv2_shuffled/`):
+
+| File | Purpose | Size (default) |
+|---|---|---|
+| `tinystoriesv2.chunk.{00-03}.jsonl` | Training data shards (one per GPU) | ~3.1M docs each |
+| `tinystoriesv2.prompt.jsonl` | Documents for batch API generation | 100k (4 × 25k) |
+| `tinystoriesv2.val.jsonl` | Validation set | 20k (4 × 5k) |
+| `tinystoriesv2.test.jsonl` | Test set | 20k (4 × 5k) |
+| `tinystoriesv2.rl.jsonl` | Reserved for RL training | 32k (4 × 8k) |
+
+Split sizes are configurable via the `data_prep` config section (`k_prompt`, `k_validation`, `k_test`, `k_rl`).
+
+Supported datasets: `tinystoriesv2`, `fineweb_edu`, `fineweb_edu_10bt`, `dclm_baseline_1.0`, `dclm_baseline_1.0_10prct`, `dclm_pool_1b_1x`, `cosmopedia_v2`, `python_edu` (see `src/data/registry.py`).
+
+SLURM: `scripts/slurm_00_prepare_data.sh`. Override dataset with `DATASET=fineweb_edu_10bt`.
+
+---
+
+### Step 1 — Create Batch API Requests
+
+Formats documents from the prompt split into OpenAI Batch API request JSONL files. Each request includes a system prompt, few-shot examples, and the document text.
+
+```bash
+# Derive docs path from config (dataset.data_dir / dataset.prompt_split):
+python scripts/01_create_batch_requests.py \
+  --config config/latent_generation.yaml
+
+# Explicit docs path:
+python scripts/01_create_batch_requests.py \
+  --docs data/tinystoriesv2_shuffled/tinystoriesv2.prompt.jsonl \
+  --config config/latent_generation.yaml
+
+# Process a subset (last 10k documents):
+python scripts/01_create_batch_requests.py \
+  --config config/latent_generation.yaml \
+  --doc-start -10000
+```
+
+The output path is printed and encodes the model, doc count, and prompt names:
+```
+data/prompt_data/gpt-5-nano-2025-08-07/docs_0000100000/gemini-3-pro-7/latent-generation/sft.jsonl
+```
+
+**Important:** After running this step, update `sft.prompt_data` in `config/latent_generation.yaml` to the output path. Step 3 uses this to extract original prompts during verification.
+
+Prompt templates are stored in `prompts/` at the project root:
+- `prompts/system_prompts/latent-generation.txt` — instructions for latent hierarchy generation
+- `prompts/user_prompts/gemini-3-pro-7.txt` — user message template with `{doc}` placeholder
+- `prompts/few_shot_examples/latent-generation.jsonl` — 7 example (user, assistant) pairs
+
+SLURM: `scripts/slurm_01_batch_create.sh`.
+
+---
+
+### Step 2 — Submit and Monitor Batch
+
+Submits the request JSONL to the OpenAI Batch API, optionally polls until completion, and downloads the results.
+
+```bash
+# Submit and monitor until done:
+python scripts/02_submit_batch.py \
+  --input data/prompt_data/.../sft.jsonl \
+  --config config/latent_generation.yaml \
+  --monitor
+
+# Submit only (check back later):
+python scripts/02_submit_batch.py \
+  --input data/prompt_data/.../sft.jsonl \
+  --config config/latent_generation.yaml
+
+# Download all completed batches filtered by run tag:
+python scripts/02_submit_batch.py \
+  --download \
+  --run-tag latent_generation_10k_v1
+
+# Monitor all active batches:
+python scripts/02_submit_batch.py --monitor-all
+```
+
+Requires `OPENAI_API_KEY` in `.env`. Results are saved to `data/batch_outputs/` with metadata encoded in the directory structure.
+
+SLURM: `scripts/slurm_02_batch_submit.sh`. Set `INPUT_FILE` to the sft.jsonl from step 1.
+
+---
 
 ### Step 3 — Verify Batch Outputs
 
@@ -443,15 +561,17 @@ SLURM: `scripts/slurm_07_rl.sh`. Set `PHASE=sft|c2f|both|joint` before submittin
 
 All defaults are defined in `src/config.py` (Pydantic schema). The YAML file only needs to specify overrides. Derived fields (`word_count_constraints`, `text_word_count`) are computed automatically from `scale_lengths`. Top-level `num_gpus` and `seed` propagate to all sections.
 
-Scripts 04, 05, and 06 work without a config file (using built-in defaults); scripts 03 and 07 require `--config` because they depend heavily on experiment-specific settings.
+Scripts 04, 05, and 06 work without a config file (using built-in defaults); scripts 00, 01, 03, and 07 require or benefit from `--config`.
 
 | Section | Controls |
 |---|---|
 | `scale_lengths` | Token counts per scale `[2, 4, 8, 16, 32]`; determines hierarchy and `seq_len = 64` |
 | `wandb` | W&B enable/disable, project, entity, group, tags, mode |
-| `batch` | Batch API provider (`openai`) — step 3 extraction format |
+| `data_prep` | Step 0: dataset name, chunk count, split sizes (`k_prompt`, `k_rl`, etc.) |
+| `dataset` | Data layout: `data_dir`, `dataset_name`, split filenames (`prompt_split`, `rl_split`, etc.) |
+| `batch` | Steps 1–2: API model, reasoning effort, prompt names, `run_tag`, output dirs |
 | `verification` | `strict_word_count` — whether word counts must match exactly |
-| `sft` | Step 4: base model, batch size, LR, epochs, veRL-specific flags |
+| `sft` | Steps 3–4: base model, batch size, LR, epochs, `prompt_data` (step 1 output path) |
 | `generation` | Step 5: sampling params (temperature, top_p, top_k, max_tokens) |
 | `c2f_training` | Step 6: init source, tokenizer type, FSDP, full HF Trainer config |
 | `rl.sft_rl` | Step 7A: GRPO rollout group size, KL coefficient, format bonus weight |
@@ -475,23 +595,32 @@ coarse-to-fine/
 ├── config/
 │   └── latent_generation.yaml       # experiment config (overrides defaults in src/config.py)
 │
+├── prompts/                         # prompt templates for batch API (step 1)
+│   ├── system_prompts/              #   system prompt text files
+│   ├── user_prompts/                #   user prompt templates with {doc} placeholder
+│   └── few_shot_examples/           #   few-shot example JSONL files
+│
 ├── scripts/
+│   ├── 00_prepare_data.py           # step 0 — download, preprocess, shuffle, split
+│   ├── 01_create_batch_requests.py  # step 1 — format documents into batch API JSONL
+│   ├── 02_submit_batch.py           # step 2 — submit, monitor, download batch results
 │   ├── 03_verify_outputs.py         # step 3 — verify batch outputs → SFT parquet
 │   ├── 04_sft_train.py              # step 4 — veRL SFT via torchrun
 │   ├── 05_generate_local.py         # step 5 — generate via vLLM or HF, verify, flatten
 │   ├── 06_train_decoder.py          # step 6 — C2F pretraining via HF Trainer ± FSDP
 │   ├── 07_rl_train.py               # step 7 — ELBO optimisation (sft / c2f / both / joint)
-│   └── slurm_*.sh                   # SLURM job scripts for steps 4–7
+│   └── slurm_*.sh                   # SLURM job scripts for steps 0–7
 │
 ├── src/
 │   ├── config.py            Pydantic config schema + loader (all defaults defined here)
+│   ├── batch/               step 1–2 — OpenAI client, request creation, submit/monitor, cost
+│   ├── data/                step 0 — dataset registry, preprocessing, Pydantic schemas
 │   ├── verification/        step 3 — space-based verifier (z_N format + word counts)
 │   ├── sft/                 step 3–4 — SFT parquet creation (dataset.py)
 │   ├── generation/          step 5 — generate_vllm / generate_hf, prompt loading, flatten
 │   ├── qwen3_joint/         C2F model — C2FConfig, C2FForCausalLM, block-prefix attention
 │   ├── c2f_training/        step 6 — C2FDataset, C2FTrainer, space tokenizer
 │   ├── rl/                  step 7 — C2FRewardManager, GRPO config, train phases
-│   ├── data/                Pydantic schemas (TrainingExample, VerificationStats)
 │   └── utils/               load_env, setup_wandb
 │
 ├── tests/
@@ -500,7 +629,9 @@ coarse-to-fine/
 │   └── test_dataset.py              format detection, SFT dataset creation
 │
 ├── data/
-│   ├── batch_outputs/           raw batch API responses (upstream)
+│   ├── tinystoriesv2_shuffled/  step 0 output  (chunks, val, test, prompt, rl splits)
+│   ├── prompt_data/             step 1 output  (batch API request JSONL)
+│   ├── batch_outputs/           step 2 output  (batch API response JSONL)
 │   ├── sft_dataset/             step 3 output  (train.parquet)
 │   ├── local_generations/       step 5 output  (c2f_train.parquet)
 │   └── rl_dataset/              step 7 data    (sft_rl.parquet, c2f_finetune/)
