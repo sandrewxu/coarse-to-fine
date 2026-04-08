@@ -170,7 +170,7 @@ class C2FAttention(Qwen3Attention):
             cache_kwargs = {"cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get(
             self.config._attn_implementation, eager_attention_forward
         )
 

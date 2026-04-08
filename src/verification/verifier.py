@@ -59,6 +59,7 @@ def verify(
         VerificationResult with pass/fail and parsed layers
     """
     result = VerificationResult(custom_id=custom_id, raw_content=content)
+    content = re.sub(r"<think>.*?</think>\s*", "", content, count=1, flags=re.DOTALL)
 
     # Parse layers
     layers = []

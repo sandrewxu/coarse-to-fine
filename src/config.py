@@ -115,9 +115,15 @@ class C2FTrainingConfig(BaseModel):
     tokenizer_dir: str = "checkpoints/decoder/tokenizer"
     checkpoint_dir: str = "checkpoints/decoder"
     num_gpus: int = 1
+    hidden_size: int | None = None
+    intermediate_size: int | None = None
+    num_hidden_layers: int | None = None
+    num_attention_heads: int | None = None
+    num_key_value_heads: int | None = None
+    head_dim: int | None = None
     per_device_batch_size: int = 8
     gradient_accumulation_steps: int = 4
-    epochs: int = 10
+    epochs: int = 1
     lr: float = 5.0e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.05

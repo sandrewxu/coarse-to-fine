@@ -46,6 +46,12 @@ def load_c2f_model(
         extra_kwargs = {}
         if vocab_size is not None:
             extra_kwargs["vocab_size"] = vocab_size
+        for key in (
+            "hidden_size", "intermediate_size", "num_hidden_layers", "num_attention_heads",
+            "num_key_value_heads", "head_dim",
+        ):
+            if c2f_config.get(key) is not None:
+                extra_kwargs[key] = c2f_config[key]
         model_config = C2FConfig(scale_lengths=scale_lengths, **extra_kwargs)
         return C2FForCausalLM(model_config)
 
@@ -211,7 +217,7 @@ class C2FTrainer(Trainer):
                 )
         self._scale_loss_steps += 1
 
-    def log(self, logs: dict, **kwargs) -> None:
+    def log(self, logs: dict, *args, **kwargs) -> None:
         """Inject per-scale losses into the log dict when training loss is flushed."""
         if self._scale_loss_steps > 0 and "loss" in logs:
             for name in self._scale_names:
@@ -221,4 +227,4 @@ class C2FTrainer(Trainer):
                     )
             self._scale_loss_accum.clear()
             self._scale_loss_steps = 0
-        super().log(logs, **kwargs)
+        super().log(logs, *args, **kwargs)

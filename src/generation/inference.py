@@ -17,6 +17,22 @@ def _apply_chat_template(tokenizer, prompts: list[str]) -> list[str]:
     return formatted
 
 
+def _vllm_worker(gpu_id: int, model_path: str, prompts: list[str],
+                  sampling_kwargs: dict, seed: int, result_queue) -> None:
+    """Run vLLM on a single GPU. Puts (gpu_id, results) on the queue."""
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+    from vllm import LLM, SamplingParams
+
+    llm = LLM(model=model_path, seed=seed, trust_remote_code=True, max_model_len=1024, max_num_seqs=1024)
+    sampling_params = SamplingParams(**sampling_kwargs)
+    tokenizer = llm.get_tokenizer()
+    formatted = _apply_chat_template(tokenizer, prompts)
+    outputs = llm.generate(formatted, sampling_params)
+    result_queue.put((gpu_id, [o.outputs[0].text for o in outputs]))
+
+
 def generate_vllm(
     model_path: str,
     prompts: list[str],
@@ -30,15 +46,7 @@ def generate_vllm(
     seed: int = 42,
 ) -> list[str]:
     """Generate using vLLM (high-throughput batched inference)."""
-    from vllm import LLM, SamplingParams
-
-    llm = LLM(
-        model=model_path,
-        tensor_parallel_size=num_gpus,
-        seed=seed,
-        trust_remote_code=True,
-    )
-    sampling_params = SamplingParams(
+    sampling_kwargs = dict(
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p,
@@ -46,10 +54,42 @@ def generate_vllm(
         repetition_penalty=repetition_penalty,
     )
 
-    tokenizer = llm.get_tokenizer()
-    formatted = _apply_chat_template(tokenizer, prompts)
-    outputs = llm.generate(formatted, sampling_params)
-    return [o.outputs[0].text for o in outputs]
+    if num_gpus <= 1:
+        import multiprocessing as mp
+        mp.set_start_method("spawn", force=True)
+        queue = mp.Queue()
+        _vllm_worker(0, model_path, prompts, sampling_kwargs, seed, queue)
+        _, results = queue.get()
+        return results
+
+    # Data parallelism: split prompts across GPUs using non-daemon Process
+    import multiprocessing as mp
+    mp.set_start_method("spawn", force=True)
+
+    chunk_size = (len(prompts) + num_gpus - 1) // num_gpus
+    prompt_chunks = [prompts[i : i + chunk_size] for i in range(0, len(prompts), chunk_size)]
+
+    print(f"  Data-parallel: splitting {len(prompts)} prompts across {len(prompt_chunks)} GPUs")
+    result_queue = mp.Queue()
+    procs = []
+    for gpu_id, chunk in enumerate(prompt_chunks):
+        p = mp.Process(
+            target=_vllm_worker,
+            args=(gpu_id, model_path, chunk, sampling_kwargs, seed, result_queue),
+        )
+        p.start()
+        procs.append(p)
+
+    # Collect results in gpu_id order
+    collected = {}
+    for _ in procs:
+        gpu_id, texts = result_queue.get()
+        collected[gpu_id] = texts
+
+    for p in procs:
+        p.join()
+
+    return [text for gpu_id in sorted(collected) for text in collected[gpu_id]]
 
 
 def generate_hf(
@@ -67,13 +107,13 @@ def generate_hf(
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, padding_side="left")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
+        model_path, dtype=torch.bfloat16, trust_remote_code=True,
     ).to(device).eval()
 
     formatted = _apply_chat_template(tokenizer, prompts)
@@ -126,6 +166,13 @@ def generate(
     if backend == "vllm":
         return generate_vllm(model_path, prompts, **kwargs)
     elif backend == "hf":
+        # Translate vLLM-style kwargs to HF-style
+        if "max_tokens" in kwargs:
+            kwargs["max_new_tokens"] = kwargs.pop("max_tokens")
+        if kwargs.get("top_k", 0) <= 0:
+            kwargs.pop("top_k", None)
+        kwargs.pop("num_gpus", None)
+        kwargs.pop("seed", None)
         return generate_hf(model_path, prompts, **kwargs)
     else:
         raise ValueError(f"Unknown backend '{backend}'. Use 'vllm' or 'hf'.")

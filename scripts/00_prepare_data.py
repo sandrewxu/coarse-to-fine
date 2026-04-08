@@ -122,7 +122,7 @@ def main() -> int:
     memory = args.memory or prep_config.get("memory_gb", 8.0)
     data_dir = args.data_dir or prep_config.get("raw_data_dir", "data")
     seed = args.seed or prep_config.get("seed", 42)
-    nchunks = args.nchunks or prep_config.get("num_chunks", 32)
+    nchunks = args.nchunks or prep_config.get("num_chunks", 8)
     final_data_dir = args.final_data_dir
     clear_work_dir = args.clear_work_dir
 

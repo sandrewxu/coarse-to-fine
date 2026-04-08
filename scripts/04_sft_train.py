@@ -62,15 +62,15 @@ def main() -> int:
     max_length = sft_config.get("max_length", 256)
     epochs = args.epochs or sft_config.get("epochs", 2)
     lr = args.lr or sft_config.get("lr", 1e-5)
-    per_device_batch = args.batch_size or sft_config.get("micro_batch_size_per_gpu", 16)
-    train_batch_size = sft_config.get("train_batch_size", 64)
+    per_device_batch = args.batch_size or sft_config.get("micro_batch_size_per_gpu", 4)
+    train_batch_size = sft_config.get("train_batch_size", 16)
     checkpoint_dir = args.checkpoint_dir or Path(sft_config.get("checkpoint_dir", "checkpoints/sft"))
     if not checkpoint_dir.is_absolute():
         checkpoint_dir = PROJECT_ROOT / checkpoint_dir
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # Gradient accumulation to reach effective batch size
-    num_gpus = args.num_gpus or sft_config.get("num_gpus", 1)
+    num_gpus = args.num_gpus or sft_config.get("num_gpus", 2)
     grad_accum = max(1, train_batch_size // (per_device_batch * num_gpus))
 
     import torch
@@ -91,6 +91,7 @@ def main() -> int:
     model = AutoModelForCausalLM.from_pretrained(
         model_name, dtype=torch.bfloat16, trust_remote_code=True,
     )
+    model.gradient_checkpointing_enable()
 
     # Load dataset
     print(f"Loading data: {args.data}")
@@ -159,7 +160,7 @@ def main() -> int:
         save_total_limit=3,
         report_to="wandb" if wandb_enabled else "none",
         run_name="sft-qwen3-4b",
-        fsdp="full_shard" if num_gpus > 1 else "",
+        gradient_checkpointing=True,
         seed=42,
     )
 
