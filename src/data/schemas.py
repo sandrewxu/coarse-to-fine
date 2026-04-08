@@ -1,7 +1,7 @@
 """
 Data schemas for training dataset creation.
 """
-from typing import Any, Optional
+from typing import Any
 from pydantic import BaseModel, Field
 
 
@@ -13,13 +13,6 @@ class TrainingExample(BaseModel):
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for parquet export."""
         return {"prompt": self.prompt, "response": self.response}
-
-
-class GenerationOutput(BaseModel):
-    """Single generation output from step 5 (local model inference)."""
-    generated_id: str = Field(..., description="Unique generation identifier")
-    prompt: str = Field(..., description="Input prompt (original text)")
-    response: str = Field(..., description="Raw generated text with z_n: labels")
 
 
 class VerificationStats(BaseModel):

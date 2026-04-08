@@ -1,73 +1,131 @@
 """
-vLLM-based inference for generating latent layer outputs from the SFT model.
+Autoregressive generation from an SFT model.
 
-The SFT model was trained on chat-format data where the user provides a 32-word
-document and the assistant generates z_4: ...\nz_3: ...\nz_2: ...\nz_1: ... output.
-This module replicates that format during generation.
+Two backends: vLLM (fast, batched) and HuggingFace (simple, no extra dependency).
+Both apply the model's chat template before generating.
 """
-from typing import Any
-
-from vllm import LLM, SamplingParams
 
 
-class LatentGenerator:
-    """vLLM-based generator for latent layer outputs."""
-
-    def __init__(self, config: dict[str, Any]):
-        """
-        Initialize vLLM engine from config.
-
-        Args:
-            config: Full experiment config; reads config['generation'] section.
-        """
-        gen_config = config["generation"]
-        self.llm = LLM(
-            model=gen_config["model_path"],
-            tensor_parallel_size=gen_config.get("num_gpus", 1),
-            seed=gen_config.get("seed", 42),
-            trust_remote_code=True,
-        )
-        self.sampling_params = SamplingParams(
-            max_tokens=gen_config.get("max_tokens", 256),
-            temperature=gen_config.get("temperature", 0.7),
-            top_p=gen_config.get("top_p", 0.9),
-            top_k=gen_config.get("top_k", -1),
-            repetition_penalty=gen_config.get("repetition_penalty", 1.0),
-        )
-        self.tokenizer = self.llm.get_tokenizer()
-
-    def _build_chat_prompt(self, text: str) -> str:
-        """
-        Format a text prompt as a chat message matching the SFT training format.
-
-        The SFT model was trained on chat completions where the user message
-        is the 32-word document. We apply the tokenizer's chat template to
-        produce the same format during generation.
-
-        Args:
-            text: The original document text to generate latents for.
-
-        Returns:
-            Formatted prompt string ready for the model.
-        """
+def _apply_chat_template(tokenizer, prompts: list[str]) -> list[str]:
+    """Format each prompt as a chat message matching the SFT training format."""
+    formatted = []
+    for text in prompts:
         messages = [{"role": "user", "content": text}]
-        return self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+        formatted.append(
+            tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         )
+    return formatted
 
-    def generate(self, prompts: list[str]) -> list[str]:
-        """
-        Generate latent outputs for a batch of prompts.
 
-        Each prompt is formatted as a chat message before generation.
-        vLLM handles batching internally for maximum throughput.
+def generate_vllm(
+    model_path: str,
+    prompts: list[str],
+    *,
+    num_gpus: int = 1,
+    max_tokens: int = 256,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    top_k: int = -1,
+    repetition_penalty: float = 1.0,
+    seed: int = 42,
+) -> list[str]:
+    """Generate using vLLM (high-throughput batched inference)."""
+    from vllm import LLM, SamplingParams
 
-        Args:
-            prompts: List of original text documents.
+    llm = LLM(
+        model=model_path,
+        tensor_parallel_size=num_gpus,
+        seed=seed,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=repetition_penalty,
+    )
 
-        Returns:
-            List of generated text strings (z_4: ...\nz_3: ... format).
-        """
-        formatted = [self._build_chat_prompt(p) for p in prompts]
-        outputs = self.llm.generate(formatted, self.sampling_params)
-        return [output.outputs[0].text for output in outputs]
+    tokenizer = llm.get_tokenizer()
+    formatted = _apply_chat_template(tokenizer, prompts)
+    outputs = llm.generate(formatted, sampling_params)
+    return [o.outputs[0].text for o in outputs]
+
+
+def generate_hf(
+    model_path: str,
+    prompts: list[str],
+    *,
+    max_new_tokens: int = 256,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    top_k: int = 50,
+    repetition_penalty: float = 1.0,
+    batch_size: int = 8,
+) -> list[str]:
+    """Generate using HuggingFace transformers (simple, no vLLM dependency)."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path, torch_dtype=torch.bfloat16, trust_remote_code=True,
+    ).to(device).eval()
+
+    formatted = _apply_chat_template(tokenizer, prompts)
+    results = []
+
+    for i in range(0, len(formatted), batch_size):
+        batch = formatted[i : i + batch_size]
+        inputs = tokenizer(batch, return_tensors="pt", padding=True).to(device)
+        input_len = inputs["input_ids"].shape[1]
+
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=temperature > 0,
+            )
+
+        for ids in output_ids:
+            text = tokenizer.decode(ids[input_len:], skip_special_tokens=True)
+            results.append(text)
+
+        if (i // batch_size + 1) % 10 == 0:
+            print(f"  Generated {min(i + batch_size, len(formatted))}/{len(formatted)}")
+
+    return results
+
+
+def generate(
+    backend: str,
+    model_path: str,
+    prompts: list[str],
+    **kwargs,
+) -> list[str]:
+    """
+    Generate from an SFT model using the specified backend.
+
+    Args:
+        backend: "vllm" or "hf"
+        model_path: Path to the SFT model checkpoint
+        prompts: List of text prompts
+        **kwargs: Passed to the backend function (max_tokens, temperature, etc.)
+
+    Returns:
+        List of generated text strings
+    """
+    if backend == "vllm":
+        return generate_vllm(model_path, prompts, **kwargs)
+    elif backend == "hf":
+        return generate_hf(model_path, prompts, **kwargs)
+    else:
+        raise ValueError(f"Unknown backend '{backend}'. Use 'vllm' or 'hf'.")

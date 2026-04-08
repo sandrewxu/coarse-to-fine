@@ -190,7 +190,7 @@ def run_c2f_finetune(
     Steps:
       1. Load prompts from the SFT training parquet.
       2. Generate z ~ q_φ(·|x) with the frozen RL-updated SFT checkpoint.
-         (Uses :class:`src.generation.inference.LatentGenerator`.)
+         (Uses :func:`src.generation.inference.generate`.)
       3. Verify and filter outputs; flatten for C2F training.
          (Reuses :func:`src.generation.dataset.verify_and_filter_outputs` and
          :func:`src.generation.dataset.flatten_for_c2f`.)
@@ -211,7 +211,7 @@ def run_c2f_finetune(
     from src.c2f_training.tokenizer import load_or_train_space_tokenizer
     from src.c2f_training.train import C2FTrainer, build_training_args, load_c2f_model
     from src.generation.dataset import flatten_for_c2f, verify_and_filter_outputs
-    from src.generation.inference import LatentGenerator
+    from src.generation.inference import generate
 
     c2f_ft_cfg = config.get("rl", {}).get("c2f_finetune", {})
     if not c2f_ft_cfg:
@@ -251,16 +251,21 @@ def run_c2f_finetune(
     print(f"Phase B — Step 1: Generating z ~ q_φ for {len(prompts):,} prompts...")
 
     # ── Step 2: Generate z ~ q_φ(·|x) with frozen SFT ──────────────────────
-    # Override model_path and num_gpus in the generation config
-    gen_config = dict(config.get("generation", {}))
-    gen_config["model_path"] = str(sft_model_path)
-    gen_config["num_gpus"] = int(
-        c2f_ft_cfg.get("num_gpus", gen_config.get("num_gpus", 1))
-    )
-    modified_config = {**config, "generation": gen_config}
+    gen_config = config.get("generation", {})
+    num_gpus = int(c2f_ft_cfg.get("num_gpus", gen_config.get("num_gpus", 1)))
 
-    generator = LatentGenerator(modified_config)
-    outputs: list[str] = generator.generate(prompts)
+    outputs: list[str] = generate(
+        backend="vllm",
+        model_path=str(sft_model_path),
+        prompts=prompts,
+        num_gpus=num_gpus,
+        max_tokens=gen_config.get("max_tokens", 256),
+        temperature=gen_config.get("temperature", 0.7),
+        top_p=gen_config.get("top_p", 0.9),
+        top_k=gen_config.get("top_k", -1),
+        repetition_penalty=gen_config.get("repetition_penalty", 1.0),
+        seed=gen_config.get("seed", 42),
+    )
 
     # ── Step 3: Verify and flatten ───────────────────────────────────────────
     print("Phase B — Step 2: Verifying and flattening outputs...")

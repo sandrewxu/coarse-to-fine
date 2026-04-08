@@ -23,4 +23,8 @@ mkdir -p "$PROJECT_ROOT/logs/generation"
 cd "$PROJECT_ROOT"
 
 # Activate venv if present
-uv run scripts/05_generate_local.py --config config/latent_generation.yaml
+uv run scripts/05_generate_local.py \
+  --data data/sft_dataset/train.parquet \
+  --model checkpoints/sft/global_step_292/huggingface \
+  --output-dir data/local_generations \
+  --config config/latent_generation.yaml
