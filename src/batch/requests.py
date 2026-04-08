@@ -24,7 +24,10 @@ def load_documents(
                 continue
             try:
                 data = json.loads(line)
-                docs.append(data.get("text", line))
+                if isinstance(data, dict):
+                    docs.append(data.get("text", line))
+                else:
+                    docs.append(str(data))
             except json.JSONDecodeError:
                 docs.append(line)
 
