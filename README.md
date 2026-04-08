@@ -39,7 +39,7 @@ A VAE-like training objective (the ELBO) then jointly tightens the approximate p
 
 ### Key design choices in this repo
 
-- **Block-prefix causal attention**: the joint model $p_\theta$ uses a transformer with a custom attention mask so that tokens at scale $k$ attend to all coarser scales but are independent within the same scale. This is in the spirit of [VAR](https://arxiv.org/abs/2404.02905) and [Block Diffusion](https://arxiv.org/abs/2503.09573).
+- **Block-prefix causal attention**: the joint model $p_\theta$ uses a transformer with a custom attention mask so that tokens at scale $k$ attend to all coarser scales but are independent within the same scale. This is in the spirit of [VAR](https://arxiv.org/abs/2404.02905) and [Block Diffusion](https://arxiv.org/abs/2503.09573). A standard **causal** mask mode is also supported for comparison.
 - **Alternating ELBO optimisation**: $q_\phi$ is updated with GRPO (REINFORCE) while $p_\theta$ is frozen, then $p_\theta$ is updated with a direct supervised gradient while $q_\phi$ is frozen. This prevents posterior collapse ([Bowman et al., 2015](https://arxiv.org/abs/1511.06349)).
 - **Space tokenizer**: a word-level tokenizer (one word = one token) guarantees that scale boundaries in the sequence are always at deterministic positions, making the fixed-layout C2F model viable.
 
@@ -69,11 +69,11 @@ In the current configuration $T = 4$, giving four latent layers $z_4$ (2 words),
 
 **Step 2 — Distil to $q_\phi$ (scripts/03–04)**
 
-Supervised fine-tune a smaller model (Qwen3-4B) on the dataset of $(x,\, z_4, z_3, z_2, z_1)$ tuples. This gives a tractable approximate posterior that imitates the prompted model's latent structure.
+Supervised fine-tune a smaller model (Qwen3-4B) on the dataset of $(x,\, z_4, z_3, z_2, z_1)$ tuples using HuggingFace Trainer. This gives a tractable approximate posterior that imitates the prompted model's latent structure.
 
 **Step 3 — Pre-train $p_\theta$ on $q_\phi$ samples (scripts/05–06)**
 
-Sample latents from $q_\phi$, verify them, and use the verified $(z, x)$ pairs to pre-train `C2FForCausalLM` with a block-prefix causal mask. This gives a well-initialised joint model that already assigns high probability to the kinds of latents $q_\phi$ produces.
+Sample latents from $q_\phi$, verify them, and use the verified $(z, x)$ pairs to pre-train `C2FForCausalLM` with a block-prefix causal mask (or standard causal mask). This gives a well-initialised joint model that already assigns high probability to the kinds of latents $q_\phi$ produces.
 
 ### Phase 1 — ELBO Optimisation (script/07)
 
@@ -183,9 +183,11 @@ Scale:      —      0          1          2           3           4
 
 Total content: 63 tokens → padded to 64 (nearest power of two). Controlled by `scale_lengths: [2, 4, 8, 16, 32]` in the config.
 
-### Block-Prefix Causal Attention Mask
+### Attention Mask
 
-Token at scale $k$ attends to all tokens at strictly coarser scales ($< k$), but not to tokens within the same scale. BOS is a universal prefix attended by every token.
+`C2FForCausalLM` supports two attention mask types, selected via `mask_type` in the config:
+
+**Block-prefix (`mask_type: "block"`, default):** Token at scale $k$ attends to all tokens at strictly coarser scales ($< k$), but not to tokens within the same scale. BOS is a universal prefix attended by every token.
 
 ```
 z_4 tokens (scale 0)  →  attend to BOS only
@@ -195,7 +197,9 @@ z_1 tokens (scale 3)  →  attend to BOS + z_4 + z_3 + z_2
  x  tokens (scale 4)  →  attend to BOS + z_4 + z_3 + z_2 + z_1
 ```
 
-Flash Attention 2 is explicitly disabled (`attn_implementation="eager"`) because FA2 ignores custom additive masks, which would silently break this pattern.
+**Causal (`mask_type: "causal"`):** Standard lower-triangular autoregressive mask where each token attends to all preceding tokens. Useful as a baseline comparison.
+
+Flash Attention 2 is explicitly disabled (`attn_implementation="eager"`) because FA2 ignores custom additive masks, which would silently break the block-prefix pattern.
 
 ### Per-Scale Position Embeddings (`C2FScaleEmbedding`)
 
@@ -238,7 +242,7 @@ Step 3   scripts/03_verify_outputs.py
   → data/sft_dataset/train.parquet    [columns: prompt, response]
 
 Step 4   scripts/04_sft_train.py
-  SFT of Qwen3-4B as q_φ encoder on batch API data (veRL + torchrun)
+  SFT of Qwen3-4B as q_φ encoder on batch API data (HF Trainer ± FSDP)
   → checkpoints/sft/
 
 Step 5   scripts/05_generate_local.py
@@ -247,6 +251,7 @@ Step 5   scripts/05_generate_local.py
 
 Step 6   scripts/06_train_decoder.py
   Pretrain C2FForCausalLM as p_θ on step 5 output (HF Trainer + FSDP)
+  Supports --mask-type block (default) or causal
   → checkpoints/decoder/
 
 Step 7   scripts/07_rl_train.py
@@ -281,10 +286,9 @@ Step 7   scripts/07_rl_train.py
 Each pipeline step has its own optional dependency group to avoid unnecessary installs:
 
 ```bash
-pip install -e ".[sft]"        # Step 4 — veRL SFT
+pip install -e ".[sft]"        # Step 4 — veRL (used only in step 7A GRPO)
 pip install -e ".[generation]" # Step 5 — vLLM generation
 pip install -e ".[c2f]"        # Step 6 — C2F pretraining
-pip install -e ".[rl]"         # Step 7 — RL ELBO training
 ```
 
 ### Secrets
@@ -434,7 +438,7 @@ Output: `data/sft_dataset/train.parquet` with columns `prompt` (32-word document
 
 ### Step 4 — Supervised Fine-Tuning
 
-Fine-tunes Qwen3-4B as $q_\phi$ on the verified parquet using veRL's FSDP SFT trainer.
+Fine-tunes Qwen3-4B as $q_\phi$ on the verified parquet using HuggingFace Trainer. Trains the model to map documents to latent hierarchies using the chat format. Saves standard HuggingFace checkpoints (`model.safetensors`) that vLLM and downstream steps can load directly.
 
 ```bash
 # Minimal — just point at data:
@@ -445,11 +449,15 @@ python scripts/04_sft_train.py \
   --data data/sft_dataset/train.parquet \
   --config config/latent_generation.yaml
 
-# Override GPU count, pass Hydra overrides to veRL:
+# Override training hyperparams:
 python scripts/04_sft_train.py \
   --data data/sft_dataset/train.parquet \
-  --num-gpus 2 \
-  trainer.total_epochs=1
+  --num-gpus 2 --epochs 3
+
+# Multi-GPU with FSDP:
+accelerate launch --num_processes=2 scripts/04_sft_train.py \
+  --data data/sft_dataset/train.parquet \
+  --config config/latent_generation.yaml
 ```
 
 SLURM: `scripts/slurm_04_sft.sh`.
@@ -491,13 +499,19 @@ SLURM: `scripts/slurm_05_generate.sh`. Override chunks with `CHUNKS="0 1"`.
 
 ### Step 6 — Pretrain C2F Joint Model
 
-Trains $p_\theta$ (`C2FForCausalLM`) on the **step 5 output** (`c2f_train.parquet`) using HF Trainer with optional FSDP. Dataset format is auto-detected from parquet columns (`text` = c2f, `prompt`+`response` = sft).
+Trains $p_\theta$ (`C2FForCausalLM`) on the **step 5 output** (`c2f_train.parquet`) using HF Trainer with optional FSDP. Dataset format is auto-detected from parquet columns (`text` = c2f, `prompt`+`response` = sft). Supports two attention mask modes: block-prefix (default) and standard causal.
 
 ```bash
-# Train on step 5 output (default):
+# Train on step 5 output with block-prefix mask (default):
 python scripts/06_train_decoder.py \
   --data data/local_generations/c2f_train.parquet \
   --config config/latent_generation.yaml
+
+# Train with standard causal attention mask:
+python scripts/06_train_decoder.py \
+  --data data/local_generations/c2f_train.parquet \
+  --config config/latent_generation.yaml \
+  --mask-type causal
 
 # Init from pretrained weights:
 python scripts/06_train_decoder.py \
@@ -575,7 +589,7 @@ Scripts 04, 05, and 06 work without a config file (using built-in defaults); scr
 | `verification` | `strict_word_count` — whether word counts must match exactly |
 | `sft` | Steps 3–4: base model, batch size, LR, epochs, `prompt_data` (step 1 output path) |
 | `generation` | Step 5: sampling params (temperature, top_p, top_k, max_tokens) |
-| `c2f_training` | Step 6: init source, tokenizer type, FSDP, full HF Trainer config |
+| `c2f_training` | Step 6: init source, tokenizer type, mask type (`block` or `causal`), FSDP, full HF Trainer config |
 | `rl.sft_rl` | Step 7A: GRPO rollout group size, KL coefficient, format bonus weight |
 | `rl.c2f_finetune` | Step 7B: generation and C2F fine-tuning hyperparams |
 
@@ -602,12 +616,14 @@ coarse-to-fine/
 │   ├── user_prompts/                #   user prompt templates with {doc} placeholder
 │   └── few_shot_examples/           #   few-shot example JSONL files
 │
+├── batch_api_requests/              # standalone batch API utilities (cost analysis, monitoring)
+│
 ├── scripts/
 │   ├── 00_prepare_data.py           # step 0 — download, preprocess, shuffle, split
 │   ├── 01_create_batch_requests.py  # step 1 — format documents into batch API JSONL
 │   ├── 02_submit_batch.py           # step 2 — submit, monitor, download batch results
 │   ├── 03_verify_outputs.py         # step 3 — verify batch outputs → SFT parquet
-│   ├── 04_sft_train.py              # step 4 — veRL SFT via torchrun
+│   ├── 04_sft_train.py              # step 4 — HF Trainer SFT (± FSDP)
 │   ├── 05_generate_local.py         # step 5 — generate via vLLM or HF, verify, flatten
 │   ├── 06_train_decoder.py          # step 6 — C2F pretraining via HF Trainer ± FSDP
 │   ├── 07_rl_train.py               # step 7 — ELBO optimisation (sft / c2f / both / joint)
@@ -620,7 +636,7 @@ coarse-to-fine/
 │   ├── verification/        step 3 — space-based verifier (z_N format + word counts)
 │   ├── sft/                 step 3–4 — SFT parquet creation (dataset.py)
 │   ├── generation/          step 5 — generate_vllm / generate_hf, prompt loading, flatten
-│   ├── qwen3_joint/         C2F model — C2FConfig, C2FForCausalLM, block-prefix attention
+│   ├── qwen3_joint/         C2F model — C2FConfig, C2FForCausalLM, block-prefix + causal attention
 │   ├── c2f_training/        step 6 — C2FDataset, C2FTrainer, space tokenizer
 │   ├── rl/                  step 7 — C2FRewardManager, GRPO config, train phases
 │   └── utils/               load_env, setup_wandb
@@ -645,7 +661,7 @@ coarse-to-fine/
 │       ├── sft/                 q_φ after Phase A GRPO
 │       └── c2f/                 p_θ after Phase B supervised fine-tuning
 │
-├── pyproject.toml               dependencies + optional groups: sft, generation, c2f, rl
+├── pyproject.toml               dependencies + optional groups: sft, generation, c2f
 └── .env.example                 template for WANDB_API_KEY, OPENAI_API_KEY, HF_TOKEN
 ```
 
