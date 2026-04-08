@@ -65,6 +65,8 @@ def main() -> int:
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
     parser.add_argument("--batch-size", type=int, default=None, help="Override per-device batch size")
     parser.add_argument("--checkpoint-dir", type=Path, default=None, help="Override checkpoint output directory")
+    parser.add_argument("--mask-type", type=str, default=None, choices=["block", "causal"],
+                        help="Attention mask: 'block' (C2F prefix) or 'causal' (standard autoregressive)")
     args = parser.parse_args()
 
     if not args.data.exists():
@@ -98,6 +100,8 @@ def main() -> int:
         c2f_cfg["per_device_batch_size"] = args.batch_size
     if args.checkpoint_dir is not None:
         c2f_cfg["checkpoint_dir"] = str(args.checkpoint_dir)
+    if args.mask_type is not None:
+        c2f_cfg["mask_type"] = args.mask_type
 
     # Detect dataset format and resolve paths
     data_path = args.data.resolve()
@@ -170,6 +174,7 @@ def main() -> int:
         train_dataset=splits["train"],
         eval_dataset=splits["test"],
         scale_lengths=config["scale_lengths"],
+        mask_type=c2f_cfg.get("mask_type", "block"),
     )
 
     print("Starting training...")

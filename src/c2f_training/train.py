@@ -52,13 +52,18 @@ def load_c2f_model(
         ):
             if c2f_config.get(key) is not None:
                 extra_kwargs[key] = c2f_config[key]
-        model_config = C2FConfig(scale_lengths=scale_lengths, **extra_kwargs)
+        model_config = C2FConfig(
+            scale_lengths=scale_lengths,
+            mask_type=c2f_config.get("mask_type", "block"),
+            **extra_kwargs,
+        )
         return C2FForCausalLM(model_config)
 
     # Load source config and create C2F config from it
     model_config = C2FConfig.from_pretrained(
         init_from,
         scale_lengths=scale_lengths,
+        mask_type=c2f_config.get("mask_type", "block"),
     )
     model = C2FForCausalLM(model_config)
 
@@ -184,9 +189,11 @@ class C2FTrainer(Trainer):
         *args, **kwargs: Forwarded to :class:`transformers.Trainer`.
     """
 
-    def __init__(self, *args, scale_lengths: list[int] | None = None, **kwargs):
+    def __init__(self, *args, scale_lengths: list[int] | None = None,
+                 mask_type: str = "block", **kwargs):
         super().__init__(*args, **kwargs)
         scale_lengths = scale_lengths or [2, 4, 8, 16, 32]
+        self._mask_type = mask_type
         self._scale_names = SCALE_NAMES
         self._scale_ranges = _build_scale_ranges(scale_lengths)
         self._scale_loss_accum: dict[str, float] = {}
@@ -207,14 +214,29 @@ class C2FTrainer(Trainer):
         self, logits: torch.Tensor, labels: torch.Tensor
     ) -> None:
         loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-        for name, (start, end) in zip(self._scale_names, self._scale_ranges):
-            s_logits = logits[:, start:end, :].reshape(-1, logits.size(-1))
-            s_labels = labels[:, start:end].reshape(-1)
-            if (s_labels != -100).any():
-                val = loss_fct(s_logits, s_labels).item()
-                self._scale_loss_accum[name] = (
-                    self._scale_loss_accum.get(name, 0.0) + val
-                )
+
+        if self._mask_type == "causal":
+            # Shifted: logits[:, :-1] predicts labels[:, 1:]
+            logits = logits[:, :-1, :]
+            labels = labels[:, 1:]
+            for name, (start, end) in zip(self._scale_names, self._scale_ranges):
+                # Original positions [start, end) → shifted indices [start-1, end-1)
+                s_logits = logits[:, start - 1:end - 1, :].reshape(-1, logits.size(-1))
+                s_labels = labels[:, start - 1:end - 1].reshape(-1)
+                if (s_labels != -100).any():
+                    val = loss_fct(s_logits, s_labels).item()
+                    self._scale_loss_accum[name] = (
+                        self._scale_loss_accum.get(name, 0.0) + val
+                    )
+        else:
+            for name, (start, end) in zip(self._scale_names, self._scale_ranges):
+                s_logits = logits[:, start:end, :].reshape(-1, logits.size(-1))
+                s_labels = labels[:, start:end].reshape(-1)
+                if (s_labels != -100).any():
+                    val = loss_fct(s_logits, s_labels).item()
+                    self._scale_loss_accum[name] = (
+                        self._scale_loss_accum.get(name, 0.0) + val
+                    )
         self._scale_loss_steps += 1
 
     def log(self, logs: dict, *args, **kwargs) -> None:

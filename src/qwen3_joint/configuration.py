@@ -31,12 +31,19 @@ class C2FConfig(Qwen3Config):
         self,
         # C2F: coarse-to-fine scale layout; last entry is the text scale.
         scale_lengths: list[int] | None = None,
+        # C2F: "block" = block-prefix mask (within-scale tokens independent),
+        #       "causal" = standard lower-triangular autoregressive mask.
+        mask_type: str = "block",
         **kwargs,
     ):
         # C2F: default scale layout matching the plan: 4 latent scales + text.
         if scale_lengths is None:
             scale_lengths = [2, 4, 8, 16, 32]
         self.scale_lengths = scale_lengths
+
+        if mask_type not in ("block", "causal"):
+            raise ValueError(f"mask_type must be 'block' or 'causal', got {mask_type!r}")
+        self.mask_type = mask_type
 
         # C2F: the block-prefix mask is an arbitrary additive bias that Flash
         # Attention 2 does not support — FA2 ignores custom masks and silently

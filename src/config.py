@@ -137,6 +137,7 @@ class C2FTrainingConfig(BaseModel):
     report_to: str = "none"
     run_name: str = "c2f-pretrain"
     seed: int = 42
+    mask_type: str = "block"
 
 
 class RlSftConfig(BaseModel):

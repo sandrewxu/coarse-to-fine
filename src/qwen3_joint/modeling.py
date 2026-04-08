@@ -92,6 +92,40 @@ def create_c2f_block_causal_mask(
     return mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
 
 
+def create_causal_mask(
+    config,
+    seq_len: int,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return a ``[batch, 1, seq_len, seq_len]`` standard causal attention mask.
+
+    Position *i* attends to all positions *j* ≤ *i* (standard autoregressive).
+    Padding positions (beyond the content region) are fully masked, with
+    self-attend on the diagonal to avoid NaN softmax rows.
+
+    ``0.0`` = attend, ``-inf`` = masked.
+    """
+    # Standard lower-triangular: attend[i, j] = (j <= i)
+    attend = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
+
+    # Mask padding positions (same logic as block mask)
+    content_len = 1 + sum(config.scale_lengths)  # BOS + all scales
+    is_pad = torch.zeros(seq_len, dtype=torch.bool, device=device)
+    is_pad[content_len:] = True
+
+    attend[:, is_pad] = False  # nothing attends to padding
+    attend[is_pad, :] = False  # padding does not attend out
+    pad_idx = is_pad.nonzero(as_tuple=True)[0]
+    attend[pad_idx, pad_idx] = True  # self-attend to avoid NaN
+
+    mask = torch.full((seq_len, seq_len), fill_value=torch.finfo(dtype).min, device=device, dtype=dtype)
+    mask[attend] = 0.0
+
+    return mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
+
+
 class C2FScaleEmbedding(nn.Module):
     """Per-scale learned absolute position embeddings.
 
@@ -283,7 +317,12 @@ class C2FModel(Qwen3Model):
         seq_len = inputs_embeds.shape[1]
         mask_key = (seq_len, inputs_embeds.device, inputs_embeds.dtype)
         if mask_key not in self._mask_cache:
-            self._mask_cache[mask_key] = create_c2f_block_causal_mask(
+            mask_fn = (
+                create_c2f_block_causal_mask
+                if self.config.mask_type == "block"
+                else create_causal_mask
+            )
+            self._mask_cache[mask_key] = mask_fn(
                 config=self.config,
                 seq_len=seq_len,
                 batch_size=1,  # stored without batch dim; expanded below
@@ -368,13 +407,23 @@ class C2FForCausalLM(Qwen3ForCausalLM):
 
         loss = None
         if labels is not None:
-            # C2F: UNSHIFTED cross-entropy — logits[i] predicts labels[i].
-            # Labels should have -100 for BOS and padding positions.
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            loss = loss_fct(
-                logits.view(-1, self.vocab_size),
-                labels.view(-1),
-            )
+            if self.config.mask_type == "causal":
+                # C2F: SHIFTED cross-entropy — logits[i] predicts labels[i+1].
+                # Standard autoregressive: each position predicts the next token.
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_labels = labels[:, 1:].contiguous()
+                loss = loss_fct(
+                    shift_logits.view(-1, self.vocab_size),
+                    shift_labels.view(-1),
+                )
+            else:
+                # C2F: UNSHIFTED cross-entropy — logits[i] predicts labels[i].
+                # Block-prefix mask: within-scale tokens are independent.
+                loss = loss_fct(
+                    logits.view(-1, self.vocab_size),
+                    labels.view(-1),
+                )
 
         return CausalLMOutputWithPast(
             loss=loss,
