@@ -3,18 +3,70 @@ ELBO optimisation training functions for Step 7.
 
 Phase A — ``run_sft_rl()``:
     GRPO on q_φ (SFT model), p_θ (C2F) frozen.
-    Gradient of φ: REINFORCE with reward = log p_θ(x, z).
-    KL(q_φ ‖ q_φ^ref) is handled by veRL via actor.use_kl_loss=true.
 
 Phase B — ``run_c2f_finetune()``:
     Supervised fine-tuning of p_θ (C2F), q_φ (SFT) frozen.
-    Gradient of θ: E_{q_φ}[∇_θ log p_θ(x, z)].
-    Reuses existing step-5 and step-6 infrastructure unchanged.
+
+Phase Joint — ``run_joint()``:
+    Simultaneous SFT + C2F training (placeholder for custom veRL modification).
 """
 import sys
 import subprocess
 from pathlib import Path
 from typing import Any
+
+
+# ── Override utilities ───────────────────────────────────────────────────────
+
+
+def _cast_value(raw: str):
+    """Cast a string override value to int / float / bool / None / str."""
+    if raw.lower() == "null":
+        return None
+    if raw.lower() == "true":
+        return True
+    if raw.lower() == "false":
+        return False
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
+def apply_overrides(
+    config: dict, overrides: list[str]
+) -> tuple[dict, list[str]]:
+    """
+    Split overrides into config-dict updates (``rl.*``) and veRL pass-throughs.
+
+    ``rl.sft_rl.epochs=1`` updates ``config['rl']['sft_rl']['epochs'] = 1``.
+    Everything else is collected as veRL Hydra overrides.
+
+    Returns:
+        (updated_config, verl_overrides)
+    """
+    verl_overrides: list[str] = []
+    for override in overrides:
+        if "=" not in override:
+            verl_overrides.append(override)
+            continue
+        key_path, _, raw_value = override.partition("=")
+        parts = key_path.split(".")
+        if parts[0] != "rl":
+            verl_overrides.append(override)
+            continue
+        node = config
+        for part in parts[:-1]:
+            if part not in node or not isinstance(node[part], dict):
+                node[part] = {}
+            node = node[part]
+        node[parts[-1]] = _cast_value(raw_value)
+    return config, verl_overrides
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -108,7 +160,7 @@ def run_sft_rl(
     """
     import os
 
-    from src.rl.verl_config import build_verl_grpo_overrides, get_verl_grpo_entrypoint
+    from src.rl.verl_config import build_verl_grpo_overrides
 
     rl_sft_cfg = config.get("rl", {}).get("sft_rl", {})
     if not rl_sft_cfg:
@@ -148,28 +200,20 @@ def run_sft_rl(
     if extra_overrides:
         overrides.extend(extra_overrides)
 
-    entrypoint = get_verl_grpo_entrypoint()
     cmd = [
         "torchrun",
         f"--nproc_per_node={num_gpus}",
-        "-m",
-        entrypoint,
+        "-m", "verl.trainer.main_ppo",
         *overrides,
     ]
     print("Phase A — GRPO on q_φ:")
     print("  Command:", " ".join(cmd))
 
-    # Export config path for the reward manager
-    _venv = os.environ.get("VIRTUAL_ENV") or str(Path(sys.executable).parent.parent)
+    # Export config path so the reward manager can locate the experiment YAML
     resolved_config_path = str(config_path) if config_path else str(
         project_root / "config" / "latent_generation.yaml"
     )
-    env = {
-        **os.environ,
-        "C2F_CONFIG_PATH": resolved_config_path,
-        "UV_NO_SYNC": "1",
-        "UV_PROJECT_ENVIRONMENT": _venv,
-    }
+    env = {**os.environ, "C2F_CONFIG_PATH": resolved_config_path}
     return subprocess.run(cmd, cwd=project_root, env=env).returncode
 
 
@@ -357,3 +401,35 @@ def run_c2f_finetune(
     trainer.save_model()
     print(f"Phase B complete. C2F model saved to: {training_args.output_dir}")
     return 0
+
+
+# ── Phase Joint ──────────────────────────────────────────────────────────────
+
+
+def run_joint(
+    config: dict[str, Any],
+    project_root: Path,
+    *,
+    config_path: str | Path | None = None,
+    wandb_enabled: bool = False,
+    extra_overrides: list[str] | None = None,
+) -> int:
+    """
+    Joint SFT + C2F training via custom veRL modification.
+
+    Placeholder — not yet implemented. This will train q_φ (SFT) and p_θ (C2F)
+    simultaneously instead of alternating between Phase A and Phase B.
+
+    Args:
+        config: Full experiment config.
+        project_root: Project root directory.
+        config_path: Path to experiment YAML (for reward manager).
+        wandb_enabled: Whether W&B is enabled.
+        extra_overrides: Additional Hydra overrides from the CLI.
+
+    Returns:
+        Process returncode (1 — not yet implemented).
+    """
+    print("Joint training phase is not yet implemented.")
+    print("This will train SFT and C2F simultaneously via a custom veRL modification.")
+    return 1

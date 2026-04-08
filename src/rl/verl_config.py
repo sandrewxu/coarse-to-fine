@@ -116,11 +116,3 @@ def build_verl_grpo_overrides(
     return overrides
 
 
-def get_verl_grpo_entrypoint() -> str:
-    """
-    Return the veRL PPO/GRPO trainer module path.
-
-    veRL uses the same ``main_ppo`` entrypoint for both PPO and GRPO; the
-    algorithm is selected via ``algorithm.adv_estimator=grpo``.
-    """
-    return "verl.trainer.main_ppo"

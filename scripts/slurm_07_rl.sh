@@ -22,9 +22,10 @@
 # Config: config/latent_generation.yaml (rl section).
 #
 # Phase selection (default: both):
-#   PHASE=sft   — only Phase A (GRPO on q_φ)
-#   PHASE=c2f   — only Phase B (supervised fine-tuning of p_θ)
+#   PHASE=sft   — Phase A only (GRPO on q_φ)
+#   PHASE=c2f   — Phase B only (supervised fine-tuning of p_θ)
 #   PHASE=both  — Phase A then Phase B
+#   PHASE=joint — Simultaneous SFT + C2F (not yet implemented)
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
