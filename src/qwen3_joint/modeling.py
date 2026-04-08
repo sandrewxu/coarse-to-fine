@@ -7,6 +7,7 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
+from src.qwen3_joint.configuration import C2FConfig
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -368,6 +369,8 @@ class C2FForCausalLM(Qwen3ForCausalLM):
     each position independently predicts its own token given coarser-scale
     context.  Therefore ``logits[i]`` predicts ``labels[i]`` (no shift).
     """
+
+    config_class = C2FConfig
 
     def __init__(self, config) -> None:
         # C2F: skip Qwen3ForCausalLM.__init__ to avoid constructing an unused
