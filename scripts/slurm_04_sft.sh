@@ -26,4 +26,6 @@ if [ -d ".venv" ]; then
   source .venv/bin/activate
 fi
 
-python scripts/04_sft_train.py --config config/latent_generation.yaml
+python scripts/04_sft_train.py \
+  --data data/sft_dataset/train.parquet \
+  --config config/latent_generation.yaml

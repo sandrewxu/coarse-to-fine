@@ -4,7 +4,7 @@ Build veRL GRPO config overrides from experiment YAML and launch args.
 Used by scripts/07_rl_train.py to build Hydra overrides and invoke the veRL
 PPO/GRPO trainer for Phase A (GRPO on q_φ, SFT model).
 
-Pattern mirrors src/sft/train.py:build_verl_sft_overrides.
+Pattern mirrors scripts/04_sft_train.py:build_overrides.
 """
 from pathlib import Path
 from typing import Any
@@ -105,7 +105,7 @@ def build_verl_grpo_overrides(
     if total_epochs is not None:
         overrides.append(f"++trainer.total_epochs={total_epochs}")
 
-    # W&B integration (mirrors build_verl_sft_overrides pattern)
+    # W&B integration (mirrors SFT override pattern)
     if wandb_enabled:
         overrides.append("++trainer.logger=['console','wandb']")
         project = os.environ.get("WANDB_PROJECT", "coarse-to-fine")
