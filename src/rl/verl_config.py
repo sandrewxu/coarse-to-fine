@@ -1,8 +1,8 @@
 """
-Build veRL GRPO config overrides from experiment YAML and launch args.
+Build veRL config overrides from experiment YAML and launch args.
 
 Used by scripts/07_rl_train.py to build Hydra overrides and invoke the veRL
-PPO/GRPO trainer for Phase A (GRPO on q_φ, SFT model).
+PPO/GRPO/REINFORCE trainer.
 
 Pattern mirrors scripts/04_sft_train.py:build_overrides.
 """
@@ -106,6 +106,92 @@ def build_verl_grpo_overrides(
         overrides.append(f"++trainer.total_epochs={total_epochs}")
 
     # W&B integration (mirrors SFT override pattern)
+    if wandb_enabled:
+        overrides.append("++trainer.logger=['console','wandb']")
+        project = os.environ.get("WANDB_PROJECT", "coarse-to-fine")
+        overrides.append(f"++trainer.project_name={project}")
+    else:
+        overrides.append("++trainer.logger=['console']")
+
+    return overrides
+
+
+def build_verl_joint_overrides(
+    rl_joint_config: dict[str, Any],
+    project_root: Path,
+    *,
+    wandb_enabled: bool = False,
+) -> list[str]:
+    """
+    Build Hydra override list for veRL REINFORCE from ``rl.joint`` config.
+
+    Key differences from :func:`build_verl_grpo_overrides`:
+      - ``algorithm.adv_estimator=reinforce_plus_plus`` (not GRPO)
+      - ``actor_rollout_ref.rollout.n=1`` (single sample per prompt)
+      - No KL loss — simplest REINFORCE for posterior collapse experiment
+      - Points to ``JointC2FRewardManager`` (trains p alongside q)
+    """
+    import os
+
+    num_gpus = int(rl_joint_config.get("num_gpus", 1))
+    model_path = rl_joint_config.get("model_path", "Qwen/Qwen3-4B")
+    dataset_dir = Path(rl_joint_config.get("dataset_dir", "data/rl_dataset"))
+    checkpoint_dir = Path(rl_joint_config.get("checkpoint_dir", "checkpoints/rl/joint"))
+
+    if not dataset_dir.is_absolute():
+        dataset_dir = project_root / dataset_dir
+    if not checkpoint_dir.is_absolute():
+        checkpoint_dir = project_root / checkpoint_dir
+
+    model_path_resolved = Path(model_path)
+    if not model_path_resolved.is_absolute() and (
+        "/" in model_path or model_path_resolved.exists() or (project_root / model_path_resolved).exists()
+    ):
+        candidate = project_root / model_path_resolved
+        if candidate.exists():
+            model_path = str(candidate)
+
+    train_parquet = dataset_dir / "sft_rl.parquet"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    overrides = [
+        # ── Trainer ─────────────────────────────────────────────────────────
+        f"++trainer.n_gpus_per_node={num_gpus}",
+        f"++trainer.default_local_dir={checkpoint_dir}",
+        # ── Model ───────────────────────────────────────────────────────────
+        f"++actor_rollout_ref.model.path={model_path}",
+        f"++actor_rollout_ref.model.partial_pretrain={model_path}",
+        f"++actor_rollout_ref.model.fsdp_config.model_dtype=bf16",
+        # ── Data ────────────────────────────────────────────────────────────
+        f"++data.train_files={train_parquet}",
+        f"++data.val_files={train_parquet}",
+        "++data.prompt_key=prompt",
+        f"++data.max_prompt_length={rl_joint_config.get('max_prompt_length', 64)}",
+        f"++data.max_response_length={rl_joint_config.get('max_response_length', 256)}",
+        f"++data.train_batch_size={rl_joint_config.get('train_batch_size', 256)}",
+        f"++data.dataloader_num_workers={rl_joint_config.get('dataloader_num_workers', 4)}",
+        # ── Algorithm: REINFORCE++ (no critic, no KL) ───────────────────────
+        "++algorithm.adv_estimator=reinforce_plus_plus",
+        "++algorithm.use_kl_in_reward=false",
+        # ── Actor / Rollout ─────────────────────────────────────────────────
+        "++actor_rollout_ref.rollout.n=1",
+        f"++actor_rollout_ref.rollout.temperature={rl_joint_config.get('temperature', 1.0)}",
+        f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
+        "++actor_rollout_ref.actor.use_kl_loss=false",
+        f"++actor_rollout_ref.actor.optim.lr={rl_joint_config.get('lr', 1e-6)}",
+        f"++actor_rollout_ref.actor.ppo_mini_batch_size={rl_joint_config.get('train_batch_size', 256)}",
+        f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
+        f"++actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
+        # ── Joint reward manager (trains p inside __call__) ─────────────────
+        "++reward_manager.source=importlib",
+        "++reward_manager.name=JointC2FRewardManager",
+        f"++reward_manager.module.path={project_root / 'src' / 'rl' / 'reward.py'}",
+    ]
+
+    total_epochs = rl_joint_config.get("epochs")
+    if total_epochs is not None:
+        overrides.append(f"++trainer.total_epochs={total_epochs}")
+
     if wandb_enabled:
         overrides.append("++trainer.logger=['console','wandb']")
         project = os.environ.get("WANDB_PROJECT", "coarse-to-fine")

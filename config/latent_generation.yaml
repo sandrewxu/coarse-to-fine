@@ -30,6 +30,12 @@ rl:
     model_path: "checkpoints/sft/global_step_292/huggingface"
   c2f_finetune:
     model_path: "checkpoints/decoder"
+  joint:
+    model_path: "checkpoints/sft/global_step_292/huggingface"
+    c2f_model_path: "checkpoints/decoder"
+    c2f_lr: 1.0e-4
+    c2f_mask_type: "causal"
+    train_batch_size: 256
 
 num_gpus: 1
 

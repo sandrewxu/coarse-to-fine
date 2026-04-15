@@ -72,7 +72,7 @@ def apply_overrides(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _prep_rl_parquet(config: dict[str, Any], project_root: Path) -> Path:
+def _prep_rl_parquet(config: dict[str, Any], project_root: Path, rl_section: str = "sft_rl") -> Path:
     """
     Build the RL training parquet from the RL split JSONL.
 
@@ -88,7 +88,7 @@ def _prep_rl_parquet(config: dict[str, Any], project_root: Path) -> Path:
     """
     from datasets import Dataset
 
-    rl_sft_cfg = config["rl"]["sft_rl"]
+    rl_sft_cfg = config["rl"][rl_section]
 
     rl_dataset_dir = Path(rl_sft_cfg.get("dataset_dir", "data/rl_dataset"))
     if not rl_dataset_dir.is_absolute():
@@ -418,10 +418,15 @@ def run_joint(
     extra_overrides: list[str] | None = None,
 ) -> int:
     """
-    Joint SFT + C2F training via custom veRL modification.
+    Joint ELBO training: REINFORCE on q_φ + supervised MLE on p_θ simultaneously.
 
-    Placeholder — not yet implemented. This will train q_φ (SFT) and p_θ (C2F)
-    simultaneously instead of alternating between Phase A and Phase B.
+    p_θ is trained inside the ``JointC2FRewardManager``: on each batch the
+    reward manager computes ``reward = log p_θ(x, z) / num_tokens`` for veRL's
+    REINFORCE update on q_φ, then does a backward pass and optimizer step on p_θ.
+
+    Expected outcome (posterior collapse sanity check): q_φ collapses to
+    degenerate latents while p_θ learns to ignore z and becomes a plain LM
+    over x.
 
     Args:
         config: Full experiment config.
@@ -431,8 +436,58 @@ def run_joint(
         extra_overrides: Additional Hydra overrides from the CLI.
 
     Returns:
-        Process returncode (1 — not yet implemented).
+        Process returncode (0 on success).
     """
-    print("Joint training phase is not yet implemented.")
-    print("This will train SFT and C2F simultaneously via a custom veRL modification.")
-    return 1
+    import os
+
+    from src.rl.verl_config import build_verl_joint_overrides
+
+    rl_joint_cfg = config.get("rl", {}).get("joint", {})
+    if not rl_joint_cfg:
+        print("Error: config['rl']['joint'] section is missing.", file=sys.stderr)
+        return 1
+
+    num_gpus = int(rl_joint_cfg.get("num_gpus", 1))
+
+    # ── Validate checkpoint paths ────────────────────────────────────────────
+    c2f_model_path = Path(rl_joint_cfg.get("c2f_model_path", "checkpoints/decoder"))
+    if not c2f_model_path.is_absolute():
+        c2f_model_path = project_root / c2f_model_path
+    if not c2f_model_path.exists():
+        print(f"Error: C2F model not found: {c2f_model_path}", file=sys.stderr)
+        print("Run step 6 (06_train_decoder.py) first.", file=sys.stderr)
+        return 1
+
+    sft_model_path = Path(rl_joint_cfg.get("model_path", "checkpoints/sft"))
+    if not sft_model_path.is_absolute():
+        sft_model_path = project_root / sft_model_path
+    if not sft_model_path.exists():
+        print(f"Error: SFT model not found: {sft_model_path}", file=sys.stderr)
+        print("Run step 4 (04_sft_train.py) first.", file=sys.stderr)
+        return 1
+
+    # ── Prepare RL dataset ───────────────────────────────────────────────────
+    print("Joint: Preparing RL dataset...")
+    _prep_rl_parquet(config, project_root, rl_section="joint")
+
+    # ── Build and launch REINFORCE ───────────────────────────────────────────
+    overrides = build_verl_joint_overrides(
+        rl_joint_cfg, project_root, wandb_enabled=wandb_enabled,
+    )
+    if extra_overrides:
+        overrides.extend(extra_overrides)
+
+    cmd = [
+        "torchrun",
+        f"--nproc_per_node={num_gpus}",
+        "-m", "verl.trainer.main_ppo",
+        *overrides,
+    ]
+    print("Joint — REINFORCE on q_φ + MLE on p_θ:")
+    print("  Command:", " ".join(cmd))
+
+    resolved_config_path = str(config_path) if config_path else str(
+        project_root / "config" / "latent_generation.yaml"
+    )
+    env = {**os.environ, "C2F_CONFIG_PATH": resolved_config_path}
+    return subprocess.run(cmd, cwd=project_root, env=env).returncode

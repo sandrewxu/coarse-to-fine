@@ -324,3 +324,267 @@ class C2FRewardManager:
         if return_dict:
             return {"reward_tensor": reward_tensor}
         return data
+
+
+# ── Joint reward manager ────────────────────────────────────────────────────
+
+
+class JointC2FRewardManager:
+    """
+    Reward manager for joint ELBO training (posterior collapse experiment).
+
+    Like :class:`C2FRewardManager` but p_θ is **trainable**: on each batch the
+    manager computes ``reward = log p_θ(x, z) / num_tokens`` for veRL's
+    REINFORCE update on q_φ, then does a backward pass and optimizer step on
+    p_θ itself.  This gives both models gradients each iteration without
+    modifying veRL internals.
+
+    The reward returned to veRL is computed **before** p_θ is updated so that
+    q's policy gradient is based on p at the time of rollout.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        num_examine: int = 0,
+        config_path: str | None = None,
+        **kwargs,
+    ):
+        from src.config import load_config
+
+        if config_path is None:
+            config_path = os.environ.get("C2F_CONFIG_PATH", _DEFAULT_CONFIG_PATH)
+        self.config = load_config(config_path)
+
+        self.scale_lengths: list[int] = self.config["scale_lengths"]
+        self.word_count_constraints: dict[str, int] = self.config["word_count_constraints"]
+        self.text_word_count: int = self.config.get("text_word_count", 32)
+
+        joint_cfg = self.config.get("rl", {}).get("joint", {})
+        self.malformed_reward: float = float(joint_cfg.get("malformed_reward", -10.0))
+        c2f_lr: float = float(joint_cfg.get("c2f_lr", 1e-4))
+        c2f_wd: float = float(joint_cfg.get("c2f_weight_decay", 0.01))
+        self._save_steps: int = int(joint_cfg.get("c2f_save_steps", 100))
+        self._save_dir = Path(joint_cfg.get("c2f_save_dir", "checkpoints/rl/joint/c2f"))
+        self._save_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── SFT tokenizer (provided by veRL) ────────────────────────────────
+        self.sft_tokenizer = tokenizer
+
+        # ── Trainable C2F model ─────────────────────────────────────────────
+        c2f_checkpoint = Path(joint_cfg.get("c2f_model_path", "checkpoints/decoder"))
+        mask_type = joint_cfg.get("c2f_mask_type", "causal")
+        print(f"[JointC2FRewardManager] Loading C2F from {c2f_checkpoint} (mask_type={mask_type})...")
+        model_config = C2FConfig.from_pretrained(str(c2f_checkpoint))
+        model_config.mask_type = mask_type
+        self.c2f_model = C2FForCausalLM(model_config)
+        self.c2f_model = _load_c2f_weights(self.c2f_model, c2f_checkpoint)
+
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.c2f_model.to(self.device)
+        self.c2f_model.train()
+
+        self.optimizer = torch.optim.AdamW(
+            self.c2f_model.parameters(), lr=c2f_lr, weight_decay=c2f_wd,
+        )
+        self._step = 0
+
+        # ── Space tokenizer ─────────────────────────────────────────────────
+        c2f_train_cfg = self.config.get("c2f_training", {})
+        tokenizer_dir = Path(
+            c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer")
+        )
+        print(f"[JointC2FRewardManager] Loading space tokenizer from {tokenizer_dir}...")
+        self.space_tokenizer = load_or_train_space_tokenizer(
+            tokenizer_dir=tokenizer_dir,
+            data_dir=c2f_train_cfg.get("dataset_dir", "data/sft_dataset"),
+            dataset_format=c2f_train_cfg.get("dataset_format", "sft"),
+        )
+
+        # ── Verification config ─────────────────────────────────────────────
+        self.strict_word_count = self.config.get("verification", {}).get(
+            "strict_word_count", True,
+        )
+
+        # ── Token ID shortcuts ───────────────────────────────────────────────
+        self.bos_id = (
+            self.space_tokenizer.bos_token_id or self.space_tokenizer.eos_token_id
+        )
+        self.pad_id = (
+            self.space_tokenizer.pad_token_id or self.space_tokenizer.eos_token_id
+        )
+        self.seq_len = 2 ** math.ceil(math.log2(1 + sum(self.scale_lengths)))
+
+        # ── Word boundaries ─────────────────────────────────────────────────
+        layer_names = ["z_4", "z_3", "z_2", "z_1"]
+        word_counts = [self.word_count_constraints[n] for n in layer_names]
+        word_counts.append(self.text_word_count)
+        self.word_boundaries: list[tuple[int, int]] = []
+        pos = 0
+        for wc in word_counts:
+            self.word_boundaries.append((pos, pos + wc))
+            pos += wc
+
+        print(f"[JointC2FRewardManager] Ready. p trainable on {self.device}, "
+              f"lr={c2f_lr}, malformed_reward={self.malformed_reward}")
+
+    # ── Helpers (same logic as C2FRewardManager) ────────────────────────────
+
+    def _strip_think(self, text: str) -> str:
+        return _THINK_RE.sub("", text).strip()
+
+    def _parse_layers(self, response: str) -> list[str] | None:
+        cleaned = self._strip_think(response)
+        result = verify_layers(
+            cleaned, self.word_count_constraints,
+            strict_word_count=self.strict_word_count,
+        )
+        if not result.passed:
+            return None
+        return [layer.content for layer in result.layers]
+
+    def _build_c2f_input(
+        self, layer_contents: list[str], prompt: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        flat_parts = layer_contents + [prompt]
+        words = " ".join(flat_parts).split()
+
+        tokens = [self.bos_id]
+        for (start, end), length in zip(self.word_boundaries, self.scale_lengths):
+            segment_text = " ".join(words[start:end])
+            encoded = self.space_tokenizer.encode(segment_text, add_special_tokens=False)
+            if len(encoded) >= length:
+                encoded = encoded[:length]
+            else:
+                encoded = encoded + [self.pad_id] * (length - len(encoded))
+            tokens.extend(encoded)
+
+        while len(tokens) < self.seq_len:
+            tokens.append(self.pad_id)
+
+        input_ids = torch.tensor(tokens[: self.seq_len], dtype=torch.long)
+        labels = input_ids.clone()
+        labels[0] = -100
+        content_len = 1 + sum(self.scale_lengths)
+        labels[content_len:] = -100
+        return input_ids, labels
+
+    def _save_checkpoint(self) -> None:
+        save_path = self._save_dir / f"step_{self._step}"
+        save_path.mkdir(parents=True, exist_ok=True)
+        self.c2f_model.save_pretrained(str(save_path))
+        torch.save(self.optimizer.state_dict(), save_path / "optimizer.pt")
+        print(f"[JointC2FRewardManager] Saved p checkpoint: {save_path}")
+
+    # ── veRL interface ──────────────────────────────────────────────────────
+
+    def __call__(self, data, return_dict: bool = False):
+        batch_size: int = data.batch["responses"].shape[0]
+        response_len: int = data.batch["responses"].shape[1]
+
+        # Decode response token IDs → strings
+        response_strs: list[str] = self.sft_tokenizer.batch_decode(
+            data.batch["responses"], skip_special_tokens=True,
+        )
+        ground_truths = data.non_tensor_batch.get("ground_truth", [""] * batch_size)
+        if hasattr(ground_truths, "tolist"):
+            ground_truths = ground_truths.tolist()
+
+        # ── Phase 1: parse responses, collect valid C2F inputs ──────────────
+        valid_indices: list[int] = []
+        all_input_ids: list[torch.Tensor] = []
+        all_labels: list[torch.Tensor] = []
+
+        for i, (response, prompt) in enumerate(zip(response_strs, ground_truths)):
+            layer_contents = self._parse_layers(response)
+            if layer_contents is None:
+                continue
+            input_ids, labels = self._build_c2f_input(layer_contents, str(prompt))
+            valid_indices.append(i)
+            all_input_ids.append(input_ids)
+            all_labels.append(labels)
+
+        reward_tensor = torch.full(
+            (batch_size, response_len), 0.0, dtype=torch.float32,
+        )
+        num_valid = len(valid_indices)
+        num_malformed = batch_size - num_valid
+
+        # ── Phase 2: batched forward + backward on p ────────────────────────
+        if num_valid > 0:
+            batch_ids = torch.stack(all_input_ids).to(self.device)    # [N, seq_len]
+            batch_labels = torch.stack(all_labels).to(self.device)    # [N, seq_len]
+
+            # Forward with gradients
+            outputs = self.c2f_model(input_ids=batch_ids, labels=batch_labels)
+
+            # Per-sample loss: re-compute with reduction='none'
+            logits = outputs.logits
+            if self.c2f_model.config.mask_type == "causal":
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_labels = batch_labels[:, 1:].contiguous()
+            else:
+                shift_logits = logits
+                shift_labels = batch_labels
+
+            per_token_loss = torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+                reduction="none",
+            ).view(shift_labels.shape)  # [N, T]
+
+            # Average per sample (only over non-masked tokens)
+            mask = shift_labels != -100  # [N, T]
+            num_tokens_per_sample = mask.sum(dim=1).clamp(min=1)  # [N]
+            per_sample_loss = (per_token_loss * mask).sum(dim=1) / num_tokens_per_sample
+
+            # Rewards = log p / num_tokens = -loss (detached, for veRL)
+            per_sample_reward = -per_sample_loss.detach().cpu()
+
+            # Update p: backward on mean loss
+            p_loss = per_sample_loss.mean()
+            self.optimizer.zero_grad()
+            p_loss.backward()
+            self.optimizer.step()
+
+            # Place rewards
+            pad_id = getattr(self.sft_tokenizer, "pad_token_id", None)
+            for j, idx in enumerate(valid_indices):
+                response_ids = data.batch["responses"][idx]
+                if pad_id is not None:
+                    non_pad = (response_ids != pad_id).nonzero(as_tuple=True)[0]
+                else:
+                    non_pad = torch.arange(response_len)
+                last_pos = int(non_pad[-1].item()) if len(non_pad) > 0 else response_len - 1
+                reward_tensor[idx, last_pos] = per_sample_reward[j]
+
+        # ── Phase 3: malformed samples get negative reward ──────────────────
+        if num_malformed > 0:
+            malformed_indices = set(range(batch_size)) - set(valid_indices)
+            pad_id = getattr(self.sft_tokenizer, "pad_token_id", None)
+            for idx in malformed_indices:
+                response_ids = data.batch["responses"][idx]
+                if pad_id is not None:
+                    non_pad = (response_ids != pad_id).nonzero(as_tuple=True)[0]
+                else:
+                    non_pad = torch.arange(response_len)
+                last_pos = int(non_pad[-1].item()) if len(non_pad) > 0 else response_len - 1
+                reward_tensor[idx, last_pos] = self.malformed_reward
+
+        data.batch["token_level_scores"] = reward_tensor
+
+        # ── Logging + checkpointing ─────────────────────────────────────────
+        self._step += 1
+        avg_reward = per_sample_reward.mean().item() if num_valid > 0 else 0.0
+        avg_loss = p_loss.item() if num_valid > 0 else 0.0
+        print(
+            f"[Joint] step={self._step}  valid={num_valid}/{batch_size}  "
+            f"p_loss={avg_loss:.4f}  reward={avg_reward:.4f}"
+        )
+        if self._step % self._save_steps == 0:
+            self._save_checkpoint()
+
+        if return_dict:
+            return {"reward_tensor": reward_tensor}
+        return data

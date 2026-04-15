@@ -174,9 +174,32 @@ class C2fFinetuneConfig(BaseModel):
     fsdp: str = "full_shard"
 
 
+class JointConfig(BaseModel):
+    model_path: str = ""
+    c2f_model_path: str = "checkpoints/decoder"
+    c2f_lr: float = 1e-4
+    c2f_weight_decay: float = 0.01
+    c2f_save_steps: int = 100
+    c2f_save_dir: str = "checkpoints/rl/joint/c2f"
+    c2f_mask_type: str = "causal"
+    num_gpus: int = 1
+    dataset_dir: str = "data/rl_dataset"
+    checkpoint_dir: str = "checkpoints/rl/joint"
+    max_prompt_length: int = 64
+    max_response_length: int = 256
+    train_batch_size: int = 256
+    temperature: float = 1.0
+    lr: float = 1e-6
+    malformed_reward: float = -10.0
+    ppo_micro_batch_size_per_gpu: int = 16
+    dataloader_num_workers: int = 4
+    epochs: int = 1
+
+
 class RlConfig(BaseModel):
     sft_rl: RlSftConfig = Field(default_factory=RlSftConfig)
     c2f_finetune: C2fFinetuneConfig = Field(default_factory=C2fFinetuneConfig)
+    joint: JointConfig = Field(default_factory=JointConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +247,7 @@ _PROPAGATED_KEYS: list[tuple[str, ...]] = [
     ("c2f_training", "num_gpus"),
     ("rl", "sft_rl", "num_gpus"),
     ("rl", "c2f_finetune", "num_gpus"),
+    ("rl", "joint", "num_gpus"),
     # top-level seed → sections that have one
     ("data_prep", "seed"),
     ("generation", "seed"),
