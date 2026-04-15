@@ -10,10 +10,18 @@ Phase B — ``run_c2f_finetune()``:
 Phase Joint — ``run_joint()``:
     Simultaneous SFT + C2F training (placeholder for custom veRL modification).
 """
+import socket
 import sys
 import subprocess
 from pathlib import Path
 from typing import Any
+
+
+def _free_port() -> int:
+    """Find a free TCP port for torch.distributed rendezvous."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
 
 
 # ── Override utilities ───────────────────────────────────────────────────────
@@ -206,6 +214,7 @@ def run_sft_rl(
     cmd = [
         sys.executable, "-m", "torch.distributed.run",
         f"--nproc_per_node={num_gpus}",
+        f"--master_port={_free_port()}",
         "-m", "verl.trainer.main_ppo",
         *overrides,
     ]
@@ -480,6 +489,7 @@ def run_joint(
     cmd = [
         sys.executable, "-m", "torch.distributed.run",
         f"--nproc_per_node={num_gpus}",
+        f"--master_port={_free_port()}",
         "-m", "verl.trainer.main_ppo",
         *overrides,
     ]
