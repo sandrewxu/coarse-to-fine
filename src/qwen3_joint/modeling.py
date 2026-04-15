@@ -264,6 +264,18 @@ class C2FModel(Qwen3Model):
         # C2F: per-scale learned absolute position embeddings
         self.scale_pos_emb = C2FScaleEmbedding(config)
 
+        # C2F: learned mask embedding for block mode.  In block mode the loss is
+        # unshifted (logits[i] predicts labels[i]), so the target token IS the
+        # input token.  The residual connection carries token_emb(input_ids[i])
+        # straight to the LM head, giving the model a trivial shortcut.
+        # Replacing content token embeddings with this learned vector removes
+        # the shortcut: the model must predict each token from attention context
+        # (earlier scales) + positional embeddings only.
+        self.mask_embedding = nn.Parameter(torch.zeros(config.hidden_size))
+
+        # C2F: number of content positions (BOS + all scales) for masking logic
+        self._content_len = 1 + sum(config.scale_lengths)
+
         # C2F: cache for the block-prefix mask, keyed by (seq_len, device, dtype).
         # The mask is deterministic given config+shape+dtype, so there is no need
         # to recompute it on every forward pass.
@@ -289,6 +301,19 @@ class C2FModel(Qwen3Model):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+
+        # C2F: in block mode, replace content token embeddings with the learned
+        # mask embedding to prevent residual leakage of the target token.
+        # BOS (position 0) and padding keep their original embeddings.
+        # The mask embedding is only used during training; at inference the
+        # model receives actual token embeddings for teacher-forced context.
+        if self.config.mask_type == "block" and self.training:
+            content_end = min(self._content_len, inputs_embeds.shape[1])
+            mask_vec = self.mask_embedding.broadcast_to(
+                inputs_embeds[:, 1:content_end].shape
+            )
+            inputs_embeds = inputs_embeds.clone()
+            inputs_embeds[:, 1:content_end] = mask_vec
 
         # C2F: add per-scale absolute position embeddings before the transformer layers
         inputs_embeds = inputs_embeds + self.scale_pos_emb(
