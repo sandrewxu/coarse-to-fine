@@ -10,18 +10,10 @@ Phase B — ``run_c2f_finetune()``:
 Phase Joint — ``run_joint()``:
     Simultaneous SFT + C2F training (placeholder for custom veRL modification).
 """
-import socket
 import sys
 import subprocess
 from pathlib import Path
 from typing import Any
-
-
-def _free_port() -> int:
-    """Find a free TCP port for torch.distributed rendezvous."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
 
 
 # ── Override utilities ───────────────────────────────────────────────────────
@@ -155,7 +147,7 @@ def run_sft_rl(
       1. Validate that required checkpoints exist.
       2. Prepare the RL parquet (add ground_truth / data_source columns).
       3. Build GRPO Hydra overrides via :func:`build_verl_grpo_overrides`.
-      4. Launch: ``python -m torch.distributed.run --nproc_per_node=N -m verl.trainer.main_ppo <overrides>``
+      4. Launch: ``python -m verl.trainer.main_ppo <overrides>``
 
     The ``C2F_CONFIG_PATH`` environment variable is set before launching so
     ``C2FRewardManager.__init__`` can locate the experiment YAML.
@@ -212,10 +204,7 @@ def run_sft_rl(
         overrides.extend(extra_overrides)
 
     cmd = [
-        sys.executable, "-m", "torch.distributed.run",
-        f"--nproc_per_node={num_gpus}",
-        f"--master_port={_free_port()}",
-        "-m", "verl.trainer.main_ppo",
+        sys.executable, "-m", "verl.trainer.main_ppo",
         *overrides,
     ]
     print("Phase A — GRPO on q_φ:")
@@ -487,10 +476,7 @@ def run_joint(
         overrides.extend(extra_overrides)
 
     cmd = [
-        sys.executable, "-m", "torch.distributed.run",
-        f"--nproc_per_node={num_gpus}",
-        f"--master_port={_free_port()}",
-        "-m", "verl.trainer.main_ppo",
+        sys.executable, "-m", "verl.trainer.main_ppo",
         *overrides,
     ]
     print("Joint — REINFORCE on q_φ + MLE on p_θ:")
