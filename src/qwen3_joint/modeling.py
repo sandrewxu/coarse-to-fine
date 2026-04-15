@@ -74,9 +74,12 @@ def create_c2f_block_causal_mask(
     # earlier scale than i, so i may condition on j).
     attend = scale_of.unsqueeze(0) < scale_of.unsqueeze(1)  # [seq, seq]
 
-    # C2F: every token may attend to itself to prevent all-(-inf) softmax rows
-    # (this is safe: a token attending only to itself is a no-op residual step).
-    attend |= torch.eye(seq_len, dtype=torch.bool, device=device)
+    # C2F: BOS (scale -1) attends to nothing via the strict-less-than rule,
+    # so it needs a self-attend entry to avoid an all-(-inf) softmax row.
+    # Content tokens always attend to at least BOS, so they do NOT get
+    # self-attend — otherwise the unshifted loss leaks the answer (the
+    # token embedding at position i is the target for logits[i]).
+    attend[0, 0] = True  # BOS self-attend only
 
     # C2F: nothing should attend to padding, and padding should not attend out.
     is_pad = scale_of == num_scales
