@@ -175,6 +175,7 @@ def build_verl_joint_overrides(
         "++algorithm.use_kl_in_reward=false",
         # ── Actor / Rollout ─────────────────────────────────────────────────
         "++actor_rollout_ref.rollout.n=1",
+        f"++actor_rollout_ref.rollout.tensor_model_parallel_size={num_gpus}",
         f"++actor_rollout_ref.rollout.temperature={rl_joint_config.get('temperature', 1.0)}",
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
         "++actor_rollout_ref.actor.use_kl_loss=false",
