@@ -485,10 +485,13 @@ def run_joint(
             *overrides,
         ]
     else:
-        # Single GPU: use plain python to avoid torchrun setting
-        # MASTER_ADDR/MASTER_PORT env vars that confuse Ray workers.
+        # Single GPU: use the gloo-patched launcher to avoid both:
+        # 1. torchrun setting MASTER_ADDR/MASTER_PORT that confuse Ray workers
+        # 2. NCCL CUDA driver version checks that fail on HPC nodes where the
+        #    bundled NCCL requires a newer driver than is installed
+        launcher = project_root / "src" / "rl" / "joint_launcher.py"
         cmd = [
-            sys.executable, "-m", "verl.trainer.main_ppo",
+            sys.executable, str(launcher),
             *overrides,
         ]
     print("Joint — REINFORCE on q_φ + MLE on p_θ:")
@@ -513,6 +516,8 @@ def run_joint(
             "NCCL_P2P_DISABLE": "1",
             "NCCL_SHM_DISABLE": "1",
             "NCCL_CUMEM_ENABLE": "0",
+            "NCCL_NVLS_ENABLE": "0",     # NVLS requires very recent drivers; H200 nodes may not have them
+            "NCCL_IB_DISABLE": "1",       # InfiniBand init can also trigger driver version checks
             "NCCL_NET": "Socket",
             "NCCL_SOCKET_IFNAME": "lo",
         })
