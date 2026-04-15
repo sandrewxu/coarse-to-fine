@@ -24,6 +24,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+# Ray hides GPUs from coordinator processes by setting CUDA_VISIBLE_DEVICES="".
+# Must be removed BEFORE importing torch, which caches the CUDA check on import.
+if os.environ.get("CUDA_VISIBLE_DEVICES", None) == "":
+    os.environ.pop("CUDA_VISIBLE_DEVICES")
+
 import torch
 from transformers import AutoTokenizer
 
@@ -380,10 +385,6 @@ class JointC2FRewardManager:
         self.c2f_model = C2FForCausalLM(model_config)
         self.c2f_model = _load_c2f_weights(self.c2f_model, c2f_checkpoint)
 
-        # Ray hides GPUs from the coordinator process (CUDA_VISIBLE_DEVICES="").
-        # Restore visibility so our small p model can use the GPU.
-        if os.environ.get("CUDA_VISIBLE_DEVICES", None) == "":
-            os.environ.pop("CUDA_VISIBLE_DEVICES")
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.c2f_model.to(self.device)
         self.c2f_model.train()
