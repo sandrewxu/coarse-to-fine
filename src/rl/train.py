@@ -477,12 +477,20 @@ def run_joint(
     if extra_overrides:
         overrides.extend(extra_overrides)
 
-    cmd = [
-        "torchrun",
-        f"--nproc_per_node={num_gpus}",
-        "-m", "verl.trainer.main_ppo",
-        *overrides,
-    ]
+    if num_gpus > 1:
+        cmd = [
+            "torchrun",
+            f"--nproc_per_node={num_gpus}",
+            "-m", "verl.trainer.main_ppo",
+            *overrides,
+        ]
+    else:
+        # Single GPU: use plain python to avoid torchrun setting
+        # MASTER_ADDR/MASTER_PORT env vars that confuse Ray workers.
+        cmd = [
+            sys.executable, "-m", "verl.trainer.main_ppo",
+            *overrides,
+        ]
     print("Joint — REINFORCE on q_φ + MLE on p_θ:")
     print("  Command:", " ".join(cmd))
 
