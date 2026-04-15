@@ -505,8 +505,11 @@ def run_joint(
         "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
         # Workaround for NCCL/CUDA driver mismatch on HPC nodes:
         # FSDP does a broadcast even with world_size=1; these flags disable
-        # NCCL features that require a newer driver than some nodes have.
+        # NCCL features that may require a newer driver.
         "NCCL_P2P_DISABLE": "1",
         "NCCL_SHM_DISABLE": "1",
+        "NCCL_CUMEM_ENABLE": "0",
+        "NCCL_NET": "Socket",
+        "NCCL_SOCKET_IFNAME": "lo",
     }
     return subprocess.run(cmd, cwd=project_root, env=env).returncode
