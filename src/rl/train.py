@@ -503,5 +503,10 @@ def run_joint(
         # Prevent Ray from setting CUDA_VISIBLE_DEVICES="" on processes with
         # num_gpus=0.  The reward manager needs GPU access for p_θ training.
         "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
+        # Workaround for NCCL/CUDA driver mismatch on HPC nodes:
+        # FSDP does a broadcast even with world_size=1; these flags disable
+        # NCCL features that require a newer driver than some nodes have.
+        "NCCL_P2P_DISABLE": "1",
+        "NCCL_SHM_DISABLE": "1",
     }
     return subprocess.run(cmd, cwd=project_root, env=env).returncode
