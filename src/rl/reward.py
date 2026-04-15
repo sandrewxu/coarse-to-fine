@@ -380,7 +380,7 @@ class JointC2FRewardManager:
         self.c2f_model = C2FForCausalLM(model_config)
         self.c2f_model = _load_c2f_weights(self.c2f_model, c2f_checkpoint)
 
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.c2f_model.to(self.device)
         self.c2f_model.train()
 
@@ -510,34 +510,43 @@ class JointC2FRewardManager:
         num_valid = len(valid_indices)
         num_malformed = batch_size - num_valid
 
-        # ── Phase 2: batched forward + backward on p ────────────────────────
+        # ── Phase 2: micro-batched forward + backward on p ──────────────────
         if num_valid > 0:
             batch_ids = torch.stack(all_input_ids).to(self.device)    # [N, seq_len]
             batch_labels = torch.stack(all_labels).to(self.device)    # [N, seq_len]
 
-            # Forward with gradients
-            outputs = self.c2f_model(input_ids=batch_ids, labels=batch_labels)
+            # Micro-batch the C2F forward to avoid OOM when N is large
+            c2f_micro_bs = 32
+            all_per_sample_loss: list[torch.Tensor] = []
 
-            # Per-sample loss: re-compute with reduction='none'
-            logits = outputs.logits
-            if self.c2f_model.config.mask_type == "causal":
-                shift_logits = logits[:, :-1, :].contiguous()
-                shift_labels = batch_labels[:, 1:].contiguous()
-            else:
-                shift_logits = logits
-                shift_labels = batch_labels
+            for mb_start in range(0, num_valid, c2f_micro_bs):
+                mb_ids = batch_ids[mb_start:mb_start + c2f_micro_bs]
+                mb_labels = batch_labels[mb_start:mb_start + c2f_micro_bs]
 
-            per_token_loss = torch.nn.functional.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100,
-                reduction="none",
-            ).view(shift_labels.shape)  # [N, T]
+                # Forward without internal loss (avoid retaining unused graph)
+                mb_outputs = self.c2f_model(input_ids=mb_ids)
 
-            # Average per sample (only over non-masked tokens)
-            mask = shift_labels != -100  # [N, T]
-            num_tokens_per_sample = mask.sum(dim=1).clamp(min=1)  # [N]
-            per_sample_loss = (per_token_loss * mask).sum(dim=1) / num_tokens_per_sample
+                mb_logits = mb_outputs.logits
+                if self.c2f_model.config.mask_type == "causal":
+                    shift_logits = mb_logits[:, :-1, :].contiguous()
+                    shift_labels = mb_labels[:, 1:].contiguous()
+                else:
+                    shift_logits = mb_logits
+                    shift_labels = mb_labels
+
+                per_token_loss = torch.nn.functional.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                    reduction="none",
+                ).view(shift_labels.shape)  # [mb, T]
+
+                mask = shift_labels != -100  # [mb, T]
+                num_tokens_per_sample = mask.sum(dim=1).clamp(min=1)  # [mb]
+                mb_per_sample_loss = (per_token_loss * mask).sum(dim=1) / num_tokens_per_sample
+                all_per_sample_loss.append(mb_per_sample_loss)
+
+            per_sample_loss = torch.cat(all_per_sample_loss)  # [N]
 
             # Rewards = log p / num_tokens = -loss (detached, for veRL)
             per_sample_reward = -per_sample_loss.detach().cpu()

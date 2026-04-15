@@ -175,8 +175,8 @@ def build_verl_joint_overrides(
         "++algorithm.use_kl_in_reward=false",
         # ── Actor / Rollout ─────────────────────────────────────────────────
         "++actor_rollout_ref.rollout.n=1",
-        f"actor_rollout_ref.rollout.tensor_model_parallel_size={num_gpus}",
-        f"actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
+        f"++actor_rollout_ref.rollout.tensor_model_parallel_size={num_gpus}",
+        f"++actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
         f"++actor_rollout_ref.rollout.temperature={rl_joint_config.get('temperature', 1.0)}",
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
         "++actor_rollout_ref.actor.use_kl_loss=false",
@@ -187,7 +187,7 @@ def build_verl_joint_overrides(
         # ── Reward model (disabled, but config must be valid) ────────────────
         "++reward_model.enable=false",
         "++reward_model.use_reward_loop=false",
-        f"reward_model.rollout.tensor_model_parallel_size={num_gpus}",
+        f"++reward_model.rollout.tensor_model_parallel_size={num_gpus}",
         # ── Joint reward manager (trains p inside __call__) ─────────────────
         "++reward_manager.source=importlib",
         "++reward_manager.name=JointC2FRewardManager",

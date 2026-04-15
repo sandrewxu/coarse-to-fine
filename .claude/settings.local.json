@@ -19,7 +19,9 @@
       "mcp__ide__getDiagnostics",
       "Bash(python3:*)",
       "Bash(source:*)",
-      "Bash(uv run:*)"
+      "Bash(uv run:*)",
+      "Bash(ls *)",
+      "Bash(pip show *)"
     ]
   }
 }
