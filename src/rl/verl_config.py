@@ -184,6 +184,10 @@ def build_verl_joint_overrides(
         f"++actor_rollout_ref.actor.ppo_mini_batch_size={rl_joint_config.get('train_batch_size', 256)}",
         f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
         f"++actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
+        # ── Reward model (disabled, but config must be valid) ────────────────
+        "++reward_model.enable=false",
+        "++reward_model.use_reward_loop=false",
+        f"reward_model.rollout.tensor_model_parallel_size={num_gpus}",
         # ── Joint reward manager (trains p inside __call__) ─────────────────
         "++reward_manager.source=importlib",
         "++reward_manager.name=JointC2FRewardManager",
