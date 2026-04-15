@@ -300,6 +300,11 @@ class C2FModel(Qwen3Model):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
+        # C2F: track whether the caller provided pre-built embeddings (inference
+        # with actual token context for already-generated scales).  If so, skip
+        # block-mode masking since the caller is responsible for the content.
+        caller_provided_embeds = inputs_embeds is not None
+
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
@@ -310,7 +315,7 @@ class C2FModel(Qwen3Model):
         # the leak removed).  At inference time, callers that want actual token
         # context for already-generated scales can pass pre-built inputs_embeds
         # directly, which bypasses this masking.
-        if self.config.mask_type == "block" and inputs_embeds is None:
+        if self.config.mask_type == "block" and not caller_provided_embeds:
             content_end = min(self._content_len, inputs_embeds.shape[1])
             mask_vec = self.mask_embedding.broadcast_to(
                 inputs_embeds[:, 1:content_end].shape
