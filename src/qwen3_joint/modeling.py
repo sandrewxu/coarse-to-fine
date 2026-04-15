@@ -51,9 +51,10 @@ def create_c2f_block_causal_mask(
 
     Token *i* (belonging to scale *k_i*) may attend to token *j* iff
     ``scale(j) < scale(i)``.  The BOS token at position 0 is assigned
-    scale ``-1`` so every content token can attend to it.  Each token may
-    also attend to **itself** (preventing all-``-inf`` softmax rows).
-    Padding positions (beyond the content region) are fully masked.
+    scale ``-1`` so every content token can attend to it.  Content tokens
+    do **not** self-attend (to avoid leaking target identity through the
+    residual stream when using unshifted loss).  BOS and padding positions
+    self-attend to prevent all-``-inf`` softmax rows.
 
     ``0.0`` = attend, ``-inf`` = masked.
     """
@@ -305,9 +306,11 @@ class C2FModel(Qwen3Model):
         # C2F: in block mode, replace content token embeddings with the learned
         # mask embedding to prevent residual leakage of the target token.
         # BOS (position 0) and padding keep their original embeddings.
-        # The mask embedding is only used during training; at inference the
-        # model receives actual token embeddings for teacher-forced context.
-        if self.config.mask_type == "block" and self.training:
+        # Applies during both training and eval (loss computation always needs
+        # the leak removed).  At inference time, callers that want actual token
+        # context for already-generated scales can pass pre-built inputs_embeds
+        # directly, which bypasses this masking.
+        if self.config.mask_type == "block" and inputs_embeds is None:
             content_end = min(self._content_len, inputs_embeds.shape[1])
             mask_vec = self.mask_embedding.broadcast_to(
                 inputs_embeds[:, 1:content_end].shape

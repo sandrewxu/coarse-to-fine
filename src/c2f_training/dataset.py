@@ -193,8 +193,11 @@ class C2FDataset(TorchDataset):
         # Mask BOS position
         labels[0] = -100
 
-        # Mask padding positions
-        labels[input_ids == self.pad_id] = -100
+        # Mask padding positions (everything beyond the content region).
+        # Use position-based masking, not token-ID-based, to avoid
+        # accidentally masking content tokens whose ID equals pad_id.
+        content_len = 1 + sum(self.scale_lengths)  # BOS + all scales
+        labels[content_len:] = -100
 
         return labels
 
