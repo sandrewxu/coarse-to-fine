@@ -147,7 +147,7 @@ def run_sft_rl(
       1. Validate that required checkpoints exist.
       2. Prepare the RL parquet (add ground_truth / data_source columns).
       3. Build GRPO Hydra overrides via :func:`build_verl_grpo_overrides`.
-      4. Launch: ``torchrun --nproc_per_node=N -m verl.trainer.main_ppo <overrides>``
+      4. Launch: ``python -m torch.distributed.run --nproc_per_node=N -m verl.trainer.main_ppo <overrides>``
 
     The ``C2F_CONFIG_PATH`` environment variable is set before launching so
     ``C2FRewardManager.__init__`` can locate the experiment YAML.
@@ -204,7 +204,7 @@ def run_sft_rl(
         overrides.extend(extra_overrides)
 
     cmd = [
-        "torchrun",
+        sys.executable, "-m", "torch.distributed.run",
         f"--nproc_per_node={num_gpus}",
         "-m", "verl.trainer.main_ppo",
         *overrides,
@@ -477,20 +477,12 @@ def run_joint(
     if extra_overrides:
         overrides.extend(extra_overrides)
 
-    if num_gpus > 1:
-        cmd = [
-            "torchrun",
-            f"--nproc_per_node={num_gpus}",
-            "-m", "verl.trainer.main_ppo",
-            *overrides,
-        ]
-    else:
-        # Single GPU: use plain python to avoid torchrun setting
-        # MASTER_ADDR/MASTER_PORT env vars that confuse Ray workers.
-        cmd = [
-            sys.executable, "-m", "verl.trainer.main_ppo",
-            *overrides,
-        ]
+    cmd = [
+        sys.executable, "-m", "torch.distributed.run",
+        f"--nproc_per_node={num_gpus}",
+        "-m", "verl.trainer.main_ppo",
+        *overrides,
+    ]
     print("Joint — REINFORCE on q_φ + MLE on p_θ:")
     print("  Command:", " ".join(cmd))
 
@@ -500,17 +492,8 @@ def run_joint(
     env = {
         **os.environ,
         "C2F_CONFIG_PATH": resolved_config_path,
-        # Prevent Ray from setting CUDA_VISIBLE_DEVICES="" on processes with
-        # num_gpus=0.  The reward manager needs GPU access for p_θ training.
+        # JointC2FRewardManager trains p_θ on GPU inside a Ray worker.
+        # Prevent Ray from clearing CUDA_VISIBLE_DEVICES for 0-GPU processes.
         "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
     }
-    if num_gpus == 1:
-        # Single-GPU: FSDP broadcasts are no-ops but still init NCCL.
-        # Use socket transport over loopback to avoid HPC-specific issues.
-        env.update({
-            "NCCL_P2P_DISABLE": "1",
-            "NCCL_SHM_DISABLE": "1",
-            "NCCL_NET": "Socket",
-            "NCCL_SOCKET_IFNAME": "lo",
-        })
     return subprocess.run(cmd, cwd=project_root, env=env).returncode
