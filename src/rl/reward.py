@@ -24,11 +24,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-# Ray hides GPUs from coordinator processes by setting CUDA_VISIBLE_DEVICES="".
-# Must be removed BEFORE importing torch, which caches the CUDA check on import.
-if os.environ.get("CUDA_VISIBLE_DEVICES", None) == "":
-    os.environ.pop("CUDA_VISIBLE_DEVICES")
-
 import torch
 from transformers import AutoTokenizer
 

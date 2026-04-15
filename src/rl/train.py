@@ -489,5 +489,11 @@ def run_joint(
     resolved_config_path = str(config_path) if config_path else str(
         project_root / "config" / "latent_generation.yaml"
     )
-    env = {**os.environ, "C2F_CONFIG_PATH": resolved_config_path}
+    env = {
+        **os.environ,
+        "C2F_CONFIG_PATH": resolved_config_path,
+        # Prevent Ray from setting CUDA_VISIBLE_DEVICES="" on processes with
+        # num_gpus=0.  The reward manager needs GPU access for p_θ training.
+        "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
+    }
     return subprocess.run(cmd, cwd=project_root, env=env).returncode
