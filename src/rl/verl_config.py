@@ -84,6 +84,7 @@ def build_verl_grpo_overrides(
         "++algorithm.adv_estimator=grpo",
         "++algorithm.use_kl_in_reward=false",
         # ── Actor / Rollout ───────────────────────────────────────────────────
+        "++actor_rollout_ref.rollout.name=vllm",
         f"++actor_rollout_ref.rollout.n={rl_sft_config.get('rollout_n', 8)}",
         f"++actor_rollout_ref.rollout.temperature={rl_sft_config.get('temperature', 1.0)}",
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
@@ -174,6 +175,7 @@ def build_verl_joint_overrides(
         "++algorithm.adv_estimator=reinforce_plus_plus",
         "++algorithm.use_kl_in_reward=false",
         # ── Actor / Rollout ─────────────────────────────────────────────────
+        "++actor_rollout_ref.rollout.name=vllm",
         "++actor_rollout_ref.rollout.n=1",
         f"++actor_rollout_ref.rollout.tensor_model_parallel_size={num_gpus}",
         f"++actor_rollout_ref.rollout.pipeline_model_parallel_size=1",

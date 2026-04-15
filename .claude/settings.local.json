@@ -21,7 +21,8 @@
       "Bash(source:*)",
       "Bash(uv run:*)",
       "Bash(ls *)",
-      "Bash(pip show *)"
+      "Bash(pip show *)",
+      "Bash(grep *)"
     ]
   }
 }
