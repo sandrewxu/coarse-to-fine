@@ -147,7 +147,7 @@ class RlSftConfig(BaseModel):
     dataset_dir: str = "data/rl_dataset"
     checkpoint_dir: str = "checkpoints/rl/sft"
     rollout_n: int = 8
-    max_prompt_length: int = 64
+    max_prompt_length: int = 256
     max_response_length: int = 256
     train_batch_size: int = 64
     temperature: float = 1.0
@@ -185,7 +185,7 @@ class JointConfig(BaseModel):
     num_gpus: int = 1
     dataset_dir: str = "data/rl_dataset"
     checkpoint_dir: str = "checkpoints/rl/joint"
-    max_prompt_length: int = 64
+    max_prompt_length: int = 256
     max_response_length: int = 256
     train_batch_size: int = 256
     temperature: float = 1.0
