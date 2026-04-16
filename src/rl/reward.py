@@ -398,6 +398,7 @@ class JointC2FRewardManager(RewardManagerBase):
         c2f_lr: float = float(joint_cfg.get("c2f_lr", 1e-4))
         c2f_wd: float = float(joint_cfg.get("c2f_weight_decay", 0.01))
         self._save_steps: int = int(joint_cfg.get("c2f_save_steps", 100))
+        self._keep_last_n: int = int(joint_cfg.get("c2f_keep_last_n", 3))
         save_dir_base = Path(joint_cfg.get("c2f_save_dir", "checkpoints/rl/joint/c2f"))
         self._save_dir = save_dir_base / f"worker_{os.getpid()}"
         self._save_dir.mkdir(parents=True, exist_ok=True)
@@ -506,18 +507,31 @@ class JointC2FRewardManager(RewardManagerBase):
         return input_ids, labels
 
     def _save_checkpoint(self) -> None:
+        import shutil
+
         save_path = self._save_dir / f"step_{self._step}"
         try:
             save_path.mkdir(parents=True, exist_ok=True)
             self.c2f_model.save_pretrained(str(save_path))
             torch.save(self.optimizer.state_dict(), save_path / "optimizer.pt")
             print(f"[JointC2FRewardManager] Saved p checkpoint: {save_path}")
-        except (OSError, RuntimeError) as e:
+        except Exception as e:
             print(
                 f"[JointC2FRewardManager] WARNING: checkpoint save failed at "
-                f"{save_path}: {e!r}. Training continues.",
+                f"{save_path}: {e!r}. Cleaning up partial save and continuing.",
                 flush=True,
             )
+            shutil.rmtree(save_path, ignore_errors=True)
+            return
+
+        step_dirs = sorted(
+            (p for p in self._save_dir.iterdir()
+             if p.is_dir() and p.name.startswith("step_")
+             and p.name.removeprefix("step_").isdigit()),
+            key=lambda p: int(p.name.removeprefix("step_")),
+        )
+        for old_dir in step_dirs[:-self._keep_last_n]:
+            shutil.rmtree(old_dir, ignore_errors=True)
 
     # ── veRL interface ──────────────────────────────────────────────────────
 
