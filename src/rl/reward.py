@@ -337,7 +337,14 @@ class C2FRewardManager(RewardManagerBase):
 
         layer_contents = self._parse_layers(response_str)
         if layer_contents is None:
-            return {"reward_score": 0.0, "reward_extra_info": {"malformed": 1.0}}
+            return {
+                "reward_score": 0.0,
+                "reward_extra_info": {
+                    "log_p_normalized": 0.0,
+                    "format_bonus": 0.0,
+                    "malformed": 1.0,
+                },
+            }
 
         log_p, num_tokens = self._log_p_c2f(layer_contents, str(gt))
         log_p_normalized = log_p / max(num_tokens, 1)
@@ -347,6 +354,7 @@ class C2FRewardManager(RewardManagerBase):
             "reward_extra_info": {
                 "log_p_normalized": float(log_p_normalized),
                 "format_bonus": float(bonus),
+                "malformed": 0.0,
             },
         }
 
@@ -653,7 +661,11 @@ class JointC2FRewardManager(RewardManagerBase):
         if layer_contents is None:
             return {
                 "reward_score": float(self.malformed_reward),
-                "reward_extra_info": {"malformed": 1.0},
+                "reward_extra_info": {
+                    "p_loss": 0.0,
+                    "malformed": 1.0,
+                    "validate": 1.0 if is_validate else 0.0,
+                },
             }
 
         input_ids, labels = self._build_c2f_input(layer_contents, str(gt))
