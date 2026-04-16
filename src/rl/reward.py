@@ -326,6 +326,15 @@ class C2FRewardManager(RewardManagerBase):
         else:
             gt = nt.get("ground_truth", "")
 
+        if not getattr(type(self), "_debug_dumped", False):
+            type(self)._debug_dumped = True
+            print(
+                f"[C2FRewardManager DEBUG] first sample:\n"
+                f"  response (len={len(response_str)}): {response_str[:800]!r}\n"
+                f"  ground_truth (len={len(str(gt))}): {str(gt)[:300]!r}",
+                flush=True,
+            )
+
         layer_contents = self._parse_layers(response_str)
         if layer_contents is None:
             return {"reward_score": 0.0, "reward_extra_info": {"malformed": 1.0}}
@@ -630,6 +639,15 @@ class JointC2FRewardManager(RewardManagerBase):
             gt = rm.get("ground_truth", "")
         else:
             gt = nt.get("ground_truth", "")
+
+        if not getattr(type(self), "_debug_dumped", False):
+            type(self)._debug_dumped = True
+            print(
+                f"[JointC2FRewardManager DEBUG] first sample (validate={is_validate}):\n"
+                f"  response (len={len(response_str)}): {response_str[:800]!r}\n"
+                f"  ground_truth (len={len(str(gt))}): {str(gt)[:300]!r}",
+                flush=True,
+            )
 
         layer_contents = self._parse_layers(response_str)
         if layer_contents is None:

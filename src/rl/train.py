@@ -120,7 +120,11 @@ def _prep_rl_parquet(config: dict[str, Any], project_root: Path, rl_section: str
     docs = load_documents_from_jsonl([rl_split_file])
 
     records = [
-        {"prompt": doc, "ground_truth": doc, "data_source": "latent_generation"}
+        {
+            "prompt": [{"role": "user", "content": doc}],
+            "ground_truth": doc,
+            "data_source": "latent_generation",
+        }
         for doc in docs
     ]
     ds = Dataset.from_list(records)
