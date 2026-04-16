@@ -188,6 +188,10 @@ def build_verl_joint_overrides(
         f"++reward.reward_model.rollout.tensor_model_parallel_size={num_gpus}",
         # ── Joint reward manager (trains p per-sample inside run_single) ────
         # Lives under `reward.reward_manager.*` (experimental reward_loop schema).
+        # num_workers=1 so a single p_θ is shared across all rollouts — required
+        # for correct joint ELBO updates (otherwise each RewardLoopWorker trains
+        # an independent copy of p_θ and q_φ's REINFORCE sees biased rewards).
+        "++reward.num_workers=1",
         "++reward.reward_manager.source=importlib",
         "++reward.reward_manager.name=JointC2FRewardManager",
         f"++reward.reward_manager.module.path={project_root / 'src' / 'rl' / 'reward.py'}",

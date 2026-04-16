@@ -398,7 +398,8 @@ class JointC2FRewardManager(RewardManagerBase):
         c2f_lr: float = float(joint_cfg.get("c2f_lr", 1e-4))
         c2f_wd: float = float(joint_cfg.get("c2f_weight_decay", 0.01))
         self._save_steps: int = int(joint_cfg.get("c2f_save_steps", 100))
-        self._save_dir = Path(joint_cfg.get("c2f_save_dir", "checkpoints/rl/joint/c2f"))
+        save_dir_base = Path(joint_cfg.get("c2f_save_dir", "checkpoints/rl/joint/c2f"))
+        self._save_dir = save_dir_base / f"worker_{os.getpid()}"
         self._save_dir.mkdir(parents=True, exist_ok=True)
 
         # ── SFT tokenizer (provided by veRL) ────────────────────────────────
@@ -506,10 +507,17 @@ class JointC2FRewardManager(RewardManagerBase):
 
     def _save_checkpoint(self) -> None:
         save_path = self._save_dir / f"step_{self._step}"
-        save_path.mkdir(parents=True, exist_ok=True)
-        self.c2f_model.save_pretrained(str(save_path))
-        torch.save(self.optimizer.state_dict(), save_path / "optimizer.pt")
-        print(f"[JointC2FRewardManager] Saved p checkpoint: {save_path}")
+        try:
+            save_path.mkdir(parents=True, exist_ok=True)
+            self.c2f_model.save_pretrained(str(save_path))
+            torch.save(self.optimizer.state_dict(), save_path / "optimizer.pt")
+            print(f"[JointC2FRewardManager] Saved p checkpoint: {save_path}")
+        except (OSError, RuntimeError) as e:
+            print(
+                f"[JointC2FRewardManager] WARNING: checkpoint save failed at "
+                f"{save_path}: {e!r}. Training continues.",
+                flush=True,
+            )
 
     # ── veRL interface ──────────────────────────────────────────────────────
 
