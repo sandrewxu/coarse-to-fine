@@ -69,7 +69,7 @@ def build_verl_grpo_overrides(
         f"++trainer.default_local_dir={checkpoint_dir}",
         # ── Model (main_ppo uses actor_rollout_ref.model.*, not model.*) ───────
         f"++actor_rollout_ref.model.path={model_path}",
-        f"++actor_rollout_ref.model.fsdp_config.model_dtype=bf16",
+        "++actor_rollout_ref.actor.fsdp_config.model_dtype=bf16",
         # ── Data ─────────────────────────────────────────────────────────────
         f"++data.train_files={train_parquet}",
         f"++data.val_files={train_parquet}",
@@ -159,7 +159,7 @@ def build_verl_joint_overrides(
         f"++trainer.default_local_dir={checkpoint_dir}",
         # ── Model ───────────────────────────────────────────────────────────
         f"++actor_rollout_ref.model.path={model_path}",
-        f"++actor_rollout_ref.model.fsdp_config.model_dtype=bf16",
+        "++actor_rollout_ref.actor.fsdp_config.model_dtype=bf16",
         # ── Data ────────────────────────────────────────────────────────────
         f"++data.train_files={train_parquet}",
         f"++data.val_files={train_parquet}",
