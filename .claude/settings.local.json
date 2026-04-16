@@ -23,7 +23,8 @@
       "Bash(ls *)",
       "Bash(pip show *)",
       "Bash(grep *)",
-      "Bash(find /Users/andrewxu/Developer/coarse-to-fine/.venv -name \"*.py\" -type f -exec grep -l \"_install_gloo_patch\" {} \\\\;)"
+      "Bash(find /Users/andrewxu/Developer/coarse-to-fine/.venv -name \"*.py\" -type f -exec grep -l \"_install_gloo_patch\" {} \\\\;)",
+      "Bash(gh api *)"
     ]
   }
 }
