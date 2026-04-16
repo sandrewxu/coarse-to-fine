@@ -88,6 +88,11 @@ def build_verl_grpo_overrides(
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
         "++actor_rollout_ref.actor.use_kl_loss=true",
         f"++actor_rollout_ref.actor.kl_loss_coef={rl_sft_config.get('kl_coef', 0.01)}",
+        # Nonzero entropy_coeff enables `actor/entropy` in W&B (ray_trainer.py:1221
+        # gates the compute+log on entropy_coeff != 0). 1e-8 is numerically
+        # negligible in the loss (dp_actor.py:650: policy_loss -= entropy * coef)
+        # but turns the metric on so we can watch q_φ's rollout entropy.
+        f"++actor_rollout_ref.actor.entropy_coeff={rl_sft_config.get('entropy_coeff', 1e-8)}",
         f"++actor_rollout_ref.actor.optim.lr={rl_sft_config.get('lr', 1e-6)}",
         f"++actor_rollout_ref.actor.ppo_mini_batch_size={rl_sft_config.get('train_batch_size', 64)}",
         f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
@@ -179,6 +184,10 @@ def build_verl_joint_overrides(
         f"++actor_rollout_ref.rollout.temperature={rl_joint_config.get('temperature', 1.0)}",
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
         "++actor_rollout_ref.actor.use_kl_loss=false",
+        # Enable `actor/entropy` logging so posterior-collapse demonstrations can
+        # show q_φ entropy decaying alongside p_loss going down. 1e-8 is
+        # numerically ≈ 0 in the loss, so the collapse dynamics are preserved.
+        f"++actor_rollout_ref.actor.entropy_coeff={rl_joint_config.get('entropy_coeff', 1e-8)}",
         f"++actor_rollout_ref.actor.optim.lr={rl_joint_config.get('lr', 1e-6)}",
         f"++actor_rollout_ref.actor.ppo_mini_batch_size={rl_joint_config.get('train_batch_size', 256)}",
         f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",

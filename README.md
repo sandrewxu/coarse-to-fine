@@ -256,9 +256,17 @@ Step 6   scripts/06_train_decoder.py
 
 Step 7   scripts/07_rl_train.py
   ELBO optimisation on RL split — alternating GRPO + supervised
-  Phase A (sft):   GRPO on q_φ, p_θ frozen  → checkpoints/rl/sft/
-  Phase B (c2f):   supervised p_θ, q_φ frozen → checkpoints/rl/c2f/
-  Phase (joint):   simultaneous SFT + C2F (placeholder)
+  Phase A (sft):    GRPO on q_φ, p_θ frozen              → checkpoints/rl/sft/
+  Phase B (c2f):    supervised p_θ, q_φ frozen           → checkpoints/rl/c2f/
+  Phase (joint):    REINFORCE on q_φ + online MLE on p_θ → checkpoints/rl/joint/
+
+Step 8   scripts/08_eval_joint.py
+  Posterior-collapse diagnostic: generate z sequences from p_θ in causal
+  mode and report unique-token ratio + top-5 most common z tokens.
+
+Step 9   scripts/09_eval_nll.py
+  Unified NLL evaluator (AR exact CE / C2F IWAE-K ELBO bound / diffusion
+  stub). Reports nats/word + bootstrap 95 % CI; for C2F, per-scale loss.
 ```
 
 | Step | Script | Required args | Key inputs | Output |
@@ -270,7 +278,9 @@ Step 7   scripts/07_rl_train.py
 | 4 | `04_sft_train.py` | `--data` | `train.parquet` (batch API data) | `checkpoints/sft/` |
 | 5 | `05_generate_local.py` | `--chunks`, `--config` | Chunk JSONL files, SFT checkpoint | `data/local_generations/c2f_train.parquet` |
 | 6 | `06_train_decoder.py` | `--data` | `c2f_train.parquet` (step 5 output) | `checkpoints/decoder/` |
-| 7 | `07_rl_train.py` | `--phase`, `--config` | SFT + C2F checkpoints, RL split | `checkpoints/rl/` |
+| 7 | `07_rl_train.py` | `--phase`, `--config` | SFT + C2F checkpoints, RL split | `checkpoints/rl/{sft,c2f,joint}/` |
+| 8 | `08_eval_joint.py` | `--checkpoint` | C2F checkpoint | Posterior-collapse diagnostics (stdout) |
+| 9 | `09_eval_nll.py` | `--model-kind`, `--ckpt`, `--test` | Checkpoint + held-out data | Aggregate nats/word + per-scale breakdown |
 
 ---
 
@@ -553,9 +563,11 @@ python scripts/07_rl_train.py --phase c2f --config config/latent_generation.yaml
 # One full round (Phase A then Phase B):
 python scripts/07_rl_train.py --phase both --config config/latent_generation.yaml
 
-# Joint training (not yet implemented):
+# Joint training — REINFORCE on q_φ with online MLE updates on p_θ:
 python scripts/07_rl_train.py --phase joint --config config/latent_generation.yaml
 ```
+
+The joint phase uses `JointC2FRewardManager` (`src/rl/reward.py`) to run a trainable $p_\theta$ inside the reward loop: per rollout sample, $p_\theta$ takes an MLE gradient step on $(z, x)$ and the `-CE_loss` is returned as the reward. $q_\phi$ is updated with REINFORCE via veRL. Malformed rollouts receive a negative reward (`rl.joint.malformed_reward`). Checkpoints are saved every `c2f_save_steps` under `checkpoints/rl/joint/c2f/`.
 
 Dot-path overrides (e.g. `rl.sft_rl.epochs=1`) update the in-memory config. Non-`rl.*` overrides are forwarded as Hydra overrides to the veRL trainer.
 
@@ -570,6 +582,45 @@ python scripts/07_rl_train.py --phase c2f --config config/latent_generation.yaml
 ```
 
 SLURM: `scripts/slurm_07_rl.sh`. Set `PHASE=sft|c2f|both|joint` before submitting.
+
+---
+
+### Step 8 — Posterior-Collapse Diagnostic
+
+Generates $z$ sequences from the trained $p_\theta$ in causal mode (left-to-right from BOS) and reports whether the latents have collapsed to a handful of repeated tokens — the classic VAE failure mode ([Bowman et al., 2015](https://arxiv.org/abs/1511.06349)).
+
+```bash
+python scripts/08_eval_joint.py --checkpoint checkpoints/rl/joint/c2f/step_100
+python scripts/08_eval_joint.py --checkpoint checkpoints/decoder --num-samples 20
+```
+
+Output (stdout): total $z$ tokens generated, unique-token count and ratio, top-5 most common $z$ tokens, plus a `COLLAPSED` / `NOT collapsed` classification at the 10 % unique-ratio threshold.
+
+---
+
+### Step 9 — Unified NLL Evaluation
+
+Scores a checkpoint on held-out data under a fixed tokenization, reporting nats/word with a bootstrap 95 % CI. Supports three model kinds:
+
+- `ar` — standard autoregressive LM; exact $-\log p(x)$ via shifted CE on raw text.
+- `c2f` — `C2FForCausalLM`; ELBO (IWAE-1 with gold $z$ from the test parquet) plus per-scale nats/token for `z_4, z_3, z_2, z_1, text`. `--K > 1` is reserved for a later pass that will sample multiple $z$ from $q_\phi$.
+- `diffusion` — stub for the forthcoming discrete-diffusion baseline.
+
+```bash
+# AR baseline on raw 32-word documents:
+python scripts/09_eval_nll.py \
+  --model-kind ar --ckpt checkpoints/ar/ \
+  --test data/tinystoriesv2_shuffled/tinystoriesv2.test.jsonl \
+  --limit 2000
+
+# C2F ELBO on a parquet that contains gold latents + text (step-5 format):
+python scripts/09_eval_nll.py \
+  --model-kind c2f --ckpt checkpoints/decoder/ \
+  --test data/local_generations/c2f_test.parquet \
+  --K 1 --out-jsonl results/decoder.per_doc.jsonl
+```
+
+The script aborts on a `vocab_size` mismatch between the model and the repo's space tokenizer so cross-model comparisons cannot be silently corrupted.
 
 ---
 
@@ -592,6 +643,7 @@ Scripts 04, 05, and 06 work without a config file (using built-in defaults); scr
 | `c2f_training` | Step 6: init source, tokenizer type, mask type (`block` or `causal`), FSDP, full HF Trainer config |
 | `rl.sft_rl` | Step 7A: GRPO rollout group size, KL coefficient, format bonus weight |
 | `rl.c2f_finetune` | Step 7B: generation and C2F fine-tuning hyperparams |
+| `rl.joint` | Step 7 joint: $p_\theta$ LR/WD, save cadence, mask type, malformed reward |
 
 Key `rl.sft_rl` fields:
 
@@ -627,6 +679,8 @@ coarse-to-fine/
 │   ├── 05_generate_local.py         # step 5 — generate via vLLM or HF, verify, flatten
 │   ├── 06_train_decoder.py          # step 6 — C2F pretraining via HF Trainer ± FSDP
 │   ├── 07_rl_train.py               # step 7 — ELBO optimisation (sft / c2f / both / joint)
+│   ├── 08_eval_joint.py             # step 8 — posterior-collapse diagnostic
+│   ├── 09_eval_nll.py               # step 9 — unified NLL evaluator (ar / c2f / diffusion)
 │   └── slurm_*.sh                   # SLURM job scripts for steps 0–7
 │
 ├── src/
@@ -638,7 +692,7 @@ coarse-to-fine/
 │   ├── generation/          step 5 — generate_vllm / generate_hf, prompt loading, flatten
 │   ├── qwen3_joint/         C2F model — C2FConfig, C2FForCausalLM, block-prefix + causal attention
 │   ├── c2f_training/        step 6 — C2FDataset, C2FTrainer, space tokenizer
-│   ├── rl/                  step 7 — C2FRewardManager, GRPO config, train phases
+│   ├── rl/                  step 7 — C2FRewardManager (alternating), JointC2FRewardManager, veRL config, phase orchestration
 │   └── utils/               load_env, setup_wandb
 │
 ├── tests/
@@ -659,7 +713,8 @@ coarse-to-fine/
 │   ├── decoder/                 p_θ C2F checkpoint (step 6)
 │   └── rl/
 │       ├── sft/                 q_φ after Phase A GRPO
-│       └── c2f/                 p_θ after Phase B supervised fine-tuning
+│       ├── c2f/                 p_θ after Phase B supervised fine-tuning
+│       └── joint/               q_φ + per-worker p_θ snapshots from the joint phase
 │
 ├── pyproject.toml               dependencies + optional groups: sft, generation, c2f
 └── .env.example                 template for WANDB_API_KEY, OPENAI_API_KEY, HF_TOKEN
@@ -678,5 +733,8 @@ Enable W&B by setting `wandb.enabled: true` in the experiment YAML and providing
 | 6 — C2F pretrain | `loss_z_4`, `loss_z_3`, `loss_z_2`, `loss_z_1`, `loss_text` (per-scale CE loss) |
 | 7A — GRPO ($q_\phi$) | Token-normalised reward ($\log p_\theta$) trending up; format pass rate increasing; KL stable |
 | 7B — C2F SFT ($p_\theta$) | `eval/loss` decreasing on freshly generated $q_\phi$ samples |
+| 7 joint | Per-step `p_loss`, `reward`, `malformed` fraction (via `reward_extra_info`); rolling $p_\theta$ checkpoints kept at `rl.joint.c2f_keep_last_n` |
+| 8 — collapse | Unique/total $z$ token ratio, top-5 most common $z$ tokens (stdout) |
+| 9 — NLL | Aggregate nats/word + 95 % CI, per-scale nats/token for C2F, per-doc JSONL export |
 
 Each step adds a run tag (`sft`, `generation`, `c2f-pretrain`, `rl-sft`, `rl-c2f`) so runs are filterable in the W&B dashboard. All scripts call `load_env()` and `setup_wandb()` from `src/utils/env.py` before any training-framework imports.
