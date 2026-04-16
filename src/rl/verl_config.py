@@ -68,9 +68,7 @@ def build_verl_grpo_overrides(
         f"++trainer.n_gpus_per_node={num_gpus}",
         f"++trainer.default_local_dir={checkpoint_dir}",
         # ── Model (main_ppo uses actor_rollout_ref.model.*, not model.*) ───────
-        # path = base model for architecture/tokenizer; partial_pretrain = weights to load
         f"++actor_rollout_ref.model.path={model_path}",
-        f"++actor_rollout_ref.model.partial_pretrain={model_path}",
         f"++actor_rollout_ref.model.fsdp_config.model_dtype=bf16",
         # ── Data ─────────────────────────────────────────────────────────────
         f"++data.train_files={train_parquet}",
@@ -161,7 +159,6 @@ def build_verl_joint_overrides(
         f"++trainer.default_local_dir={checkpoint_dir}",
         # ── Model ───────────────────────────────────────────────────────────
         f"++actor_rollout_ref.model.path={model_path}",
-        f"++actor_rollout_ref.model.partial_pretrain={model_path}",
         f"++actor_rollout_ref.model.fsdp_config.model_dtype=bf16",
         # ── Data ────────────────────────────────────────────────────────────
         f"++data.train_files={train_parquet}",
