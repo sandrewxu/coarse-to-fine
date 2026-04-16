@@ -93,11 +93,11 @@ def build_verl_grpo_overrides(
         f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
         f"++actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
         # ── Custom reward manager (full class, loaded via importlib) ─────────
-        # source=importlib tells veRL to load the class from a file rather than
-        # looking it up in the built-in registry (which doesn't know "custom").
-        "++reward_manager.source=importlib",
-        "++reward_manager.name=C2FRewardManager",
-        f"++reward_manager.module.path={project_root / 'src' / 'rl' / 'reward.py'}",
+        # Lives under `reward.reward_manager.*` in the experimental reward_loop
+        # config schema (see verl/trainer/ppo/reward.py:load_reward_manager).
+        "++reward.reward_manager.source=importlib",
+        "++reward.reward_manager.name=C2FRewardManager",
+        f"++reward.reward_manager.module.path={project_root / 'src' / 'rl' / 'reward.py'}",
     ]
 
     total_epochs = rl_sft_config.get("epochs")
@@ -184,13 +184,13 @@ def build_verl_joint_overrides(
         f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
         f"++actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
         # ── Reward model (disabled, but config must be valid) ────────────────
-        "++reward_model.enable=false",
-        "++reward_model.use_reward_loop=false",
-        f"++reward_model.rollout.tensor_model_parallel_size={num_gpus}",
-        # ── Joint reward manager (trains p inside __call__) ─────────────────
-        "++reward_manager.source=importlib",
-        "++reward_manager.name=JointC2FRewardManager",
-        f"++reward_manager.module.path={project_root / 'src' / 'rl' / 'reward.py'}",
+        "++reward.reward_model.enable=false",
+        f"++reward.reward_model.rollout.tensor_model_parallel_size={num_gpus}",
+        # ── Joint reward manager (trains p per-sample inside run_single) ────
+        # Lives under `reward.reward_manager.*` (experimental reward_loop schema).
+        "++reward.reward_manager.source=importlib",
+        "++reward.reward_manager.name=JointC2FRewardManager",
+        f"++reward.reward_manager.module.path={project_root / 'src' / 'rl' / 'reward.py'}",
     ]
 
     total_epochs = rl_joint_config.get("epochs")

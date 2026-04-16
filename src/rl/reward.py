@@ -18,6 +18,7 @@ stored in the experiment YAML (``config/latent_generation.yaml``),
 which is located via the ``C2F_CONFIG_PATH`` environment variable (set by the
 SLURM/launch script before torchrun) or defaults to the repo-relative path.
 """
+import asyncio
 import math
 import os
 import re
@@ -26,6 +27,7 @@ from typing import Any
 
 import torch
 from transformers import AutoTokenizer
+from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 
 from src.c2f_training.tokenizer import load_or_train_space_tokenizer
 from src.qwen3_joint.configuration import C2FConfig
@@ -58,52 +60,37 @@ def _load_c2f_weights(model: C2FForCausalLM, checkpoint_path: Path) -> C2FForCau
     return model
 
 
-class C2FRewardManager:
+class C2FRewardManager(RewardManagerBase):
     """
     Reward manager for GRPO training on the SFT model q_φ.
 
-    Reward = log p_θ(x, z) / num_tokens + format_bonus
+    Reward = log p_θ(x, z) / num_tokens + format_bonus  (C2F is frozen).
 
-    where:
-      - log p_θ(x, z)  is the negative C2F cross-entropy loss scaled by the
-                        number of unmasked tokens (so longer sequences are not
-                        unfairly penalised).
-      - format_bonus    is ``format_bonus_weight`` when every latent layer has
-                        the correct word count, else proportional partial credit.
-
-    The C2F model is kept frozen throughout; only q_φ is trained.
-
-    Args:
-        tokenizer:
-            The SFT model tokenizer provided by veRL at init time.  Used to
-            decode response token IDs back to strings.
-        num_examine:
-            veRL compatibility argument (unused).
-        config_path:
-            Path to the experiment YAML.  Defaults to the ``C2F_CONFIG_PATH``
-            environment variable, or ``config/latent_generation.yaml``
-            relative to the repository root.
+    Conforms to verl's experimental reward_loop interface: subclasses
+    ``RewardManagerBase`` and implements ``async run_single`` for per-sample
+    scoring. The experiment YAML is located via the ``C2F_CONFIG_PATH`` env
+    var (set by the launch script), or falls back to ``config/latent_generation.yaml``.
     """
 
     def __init__(
         self,
+        config,
         tokenizer,
-        num_examine: int = 0,
-        config_path: str | None = None,
+        compute_score=None,
         **kwargs,
     ):
-        # ── Load experiment config ───────────────────────────────────────────
+        super().__init__(config, tokenizer, compute_score)
+
         from src.config import load_config
 
-        if config_path is None:
-            config_path = os.environ.get("C2F_CONFIG_PATH", _DEFAULT_CONFIG_PATH)
-        self.config = load_config(config_path)
+        config_path = os.environ.get("C2F_CONFIG_PATH", _DEFAULT_CONFIG_PATH)
+        self.exp_config = load_config(config_path)
 
-        self.scale_lengths: list[int] = self.config["scale_lengths"]
-        self.word_count_constraints: dict[str, int] = self.config["word_count_constraints"]
-        self.text_word_count: int = self.config.get("text_word_count", 32)
+        self.scale_lengths: list[int] = self.exp_config["scale_lengths"]
+        self.word_count_constraints: dict[str, int] = self.exp_config["word_count_constraints"]
+        self.text_word_count: int = self.exp_config.get("text_word_count", 32)
 
-        rl_cfg = self.config.get("rl", {}).get("sft_rl", {})
+        rl_cfg = self.exp_config.get("rl", {}).get("sft_rl", {})
         self.format_bonus_weight: float = float(rl_cfg.get("format_bonus_weight", 0.1))
 
         # ── SFT tokenizer (provided by veRL) ────────────────────────────────
@@ -122,7 +109,7 @@ class C2FRewardManager:
         self.device = next(self.c2f_model.parameters()).device
 
         # ── Space tokenizer (word-level, 1 word = 1 token) ──────────────────
-        c2f_train_cfg = self.config.get("c2f_training", {})
+        c2f_train_cfg = self.exp_config.get("c2f_training", {})
         tokenizer_dir = Path(
             c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer")
         )
@@ -134,7 +121,7 @@ class C2FRewardManager:
         )
 
         # ── Verification config ─────────────────────────────────────────────
-        self.strict_word_count = self.config.get("verification", {}).get("strict_word_count", True)
+        self.strict_word_count = self.exp_config.get("verification", {}).get("strict_word_count", True)
 
         # ── Token ID shortcuts ───────────────────────────────────────────────
         self.bos_id = (
@@ -325,42 +312,65 @@ class C2FRewardManager:
             return {"reward_tensor": reward_tensor}
         return data
 
+    async def run_single(self, data) -> dict:
+        data_item = data[0]
+        response_ids = data_item.batch["responses"]
+        response_str = self.sft_tokenizer.decode(
+            response_ids.tolist(), skip_special_tokens=True,
+        )
+
+        nt = data_item.non_tensor_batch
+        rm = nt.get("reward_model")
+        if isinstance(rm, dict):
+            gt = rm.get("ground_truth", "")
+        else:
+            gt = nt.get("ground_truth", "")
+
+        layer_contents = self._parse_layers(response_str)
+        if layer_contents is None:
+            return {"reward_score": 0.0}
+
+        log_p, num_tokens = self._log_p_c2f(layer_contents, str(gt))
+        log_p_normalized = log_p / max(num_tokens, 1)
+        bonus = self._format_bonus(response_str)
+        return {"reward_score": float(log_p_normalized + bonus)}
+
 
 # ── Joint reward manager ────────────────────────────────────────────────────
 
 
-class JointC2FRewardManager:
+class JointC2FRewardManager(RewardManagerBase):
     """
     Reward manager for joint ELBO training (posterior collapse experiment).
 
-    Like :class:`C2FRewardManager` but p_θ is **trainable**: on each batch the
-    manager computes ``reward = log p_θ(x, z) / num_tokens`` for veRL's
-    REINFORCE update on q_φ, then does a backward pass and optimizer step on
-    p_θ itself.  This gives both models gradients each iteration without
-    modifying veRL internals.
+    Like :class:`C2FRewardManager` but p_θ is **trainable**: per rollout sample
+    the manager computes ``reward = -CE_loss`` and takes a per-sample optimizer
+    step on p_θ (scoring and training share one forward+backward). Validation
+    calls (``data.meta_info['validate'] == True``) skip the optimizer step.
 
-    The reward returned to veRL is computed **before** p_θ is updated so that
-    q's policy gradient is based on p at the time of rollout.
+    All p_θ updates are serialized through ``self._c2f_lock`` so concurrent
+    ``run_single`` coroutines don't interleave CUDA ops on the shared model.
     """
 
     def __init__(
         self,
+        config,
         tokenizer,
-        num_examine: int = 0,
-        config_path: str | None = None,
+        compute_score=None,
         **kwargs,
     ):
+        super().__init__(config, tokenizer, compute_score)
+
         from src.config import load_config
 
-        if config_path is None:
-            config_path = os.environ.get("C2F_CONFIG_PATH", _DEFAULT_CONFIG_PATH)
-        self.config = load_config(config_path)
+        config_path = os.environ.get("C2F_CONFIG_PATH", _DEFAULT_CONFIG_PATH)
+        self.exp_config = load_config(config_path)
 
-        self.scale_lengths: list[int] = self.config["scale_lengths"]
-        self.word_count_constraints: dict[str, int] = self.config["word_count_constraints"]
-        self.text_word_count: int = self.config.get("text_word_count", 32)
+        self.scale_lengths: list[int] = self.exp_config["scale_lengths"]
+        self.word_count_constraints: dict[str, int] = self.exp_config["word_count_constraints"]
+        self.text_word_count: int = self.exp_config.get("text_word_count", 32)
 
-        joint_cfg = self.config.get("rl", {}).get("joint", {})
+        joint_cfg = self.exp_config.get("rl", {}).get("joint", {})
         self.malformed_reward: float = float(joint_cfg.get("malformed_reward", -10.0))
         c2f_lr: float = float(joint_cfg.get("c2f_lr", 1e-4))
         c2f_wd: float = float(joint_cfg.get("c2f_weight_decay", 0.01))
@@ -390,7 +400,7 @@ class JointC2FRewardManager:
         self._step = 0
 
         # ── Space tokenizer ─────────────────────────────────────────────────
-        c2f_train_cfg = self.config.get("c2f_training", {})
+        c2f_train_cfg = self.exp_config.get("c2f_training", {})
         tokenizer_dir = Path(
             c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer")
         )
@@ -402,7 +412,7 @@ class JointC2FRewardManager:
         )
 
         # ── Verification config ─────────────────────────────────────────────
-        self.strict_word_count = self.config.get("verification", {}).get(
+        self.strict_word_count = self.exp_config.get("verification", {}).get(
             "strict_word_count", True,
         )
 
@@ -424,6 +434,8 @@ class JointC2FRewardManager:
         for wc in word_counts:
             self.word_boundaries.append((pos, pos + wc))
             pos += wc
+
+        self._c2f_lock = asyncio.Lock()
 
         print(f"[JointC2FRewardManager] Ready. p trainable on {self.device}, "
               f"lr={c2f_lr}, malformed_reward={self.malformed_reward}")
@@ -597,3 +609,62 @@ class JointC2FRewardManager:
         if return_dict:
             return {"reward_tensor": reward_tensor}
         return data
+
+    async def run_single(self, data) -> dict:
+        is_validate = bool(data.meta_info.get("validate", False))
+        data_item = data[0]
+        response_ids = data_item.batch["responses"]
+        response_str = self.sft_tokenizer.decode(
+            response_ids.tolist(), skip_special_tokens=True,
+        )
+
+        nt = data_item.non_tensor_batch
+        rm = nt.get("reward_model")
+        if isinstance(rm, dict):
+            gt = rm.get("ground_truth", "")
+        else:
+            gt = nt.get("ground_truth", "")
+
+        layer_contents = self._parse_layers(response_str)
+        if layer_contents is None:
+            return {"reward_score": float(self.malformed_reward)}
+
+        input_ids, labels = self._build_c2f_input(layer_contents, str(gt))
+        input_ids = input_ids.unsqueeze(0).to(self.device)
+        labels = labels.unsqueeze(0).to(self.device)
+
+        async with self._c2f_lock:
+            self.c2f_model.train(mode=not is_validate)
+            with torch.set_grad_enabled(not is_validate):
+                outputs = self.c2f_model(input_ids=input_ids)
+                logits = outputs.logits
+
+                if self.c2f_model.config.mask_type == "causal":
+                    shift_logits = logits[:, :-1, :].contiguous()
+                    shift_labels = labels[:, 1:].contiguous()
+                else:
+                    shift_logits = logits
+                    shift_labels = labels
+
+                per_token_loss = torch.nn.functional.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                    reduction="none",
+                ).view(shift_labels.shape)
+
+                mask = shift_labels != -100
+                num_tokens = mask.sum().clamp(min=1)
+                sample_loss = (per_token_loss * mask).sum() / num_tokens
+
+            reward = -sample_loss.detach().cpu().item()
+
+            if not is_validate:
+                self.optimizer.zero_grad()
+                sample_loss.backward()
+                self.optimizer.step()
+                self._step += 1
+                if self._step % self._save_steps == 0:
+                    self._save_checkpoint()
+
+        return {"reward_score": float(reward)}
