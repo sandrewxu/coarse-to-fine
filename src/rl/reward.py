@@ -328,12 +328,18 @@ class C2FRewardManager(RewardManagerBase):
 
         layer_contents = self._parse_layers(response_str)
         if layer_contents is None:
-            return {"reward_score": 0.0}
+            return {"reward_score": 0.0, "reward_extra_info": {"malformed": 1.0}}
 
         log_p, num_tokens = self._log_p_c2f(layer_contents, str(gt))
         log_p_normalized = log_p / max(num_tokens, 1)
         bonus = self._format_bonus(response_str)
-        return {"reward_score": float(log_p_normalized + bonus)}
+        return {
+            "reward_score": float(log_p_normalized + bonus),
+            "reward_extra_info": {
+                "log_p_normalized": float(log_p_normalized),
+                "format_bonus": float(bonus),
+            },
+        }
 
 
 # ── Joint reward manager ────────────────────────────────────────────────────
@@ -627,7 +633,10 @@ class JointC2FRewardManager(RewardManagerBase):
 
         layer_contents = self._parse_layers(response_str)
         if layer_contents is None:
-            return {"reward_score": float(self.malformed_reward)}
+            return {
+                "reward_score": float(self.malformed_reward),
+                "reward_extra_info": {"malformed": 1.0},
+            }
 
         input_ids, labels = self._build_c2f_input(layer_contents, str(gt))
         input_ids = input_ids.unsqueeze(0).to(self.device)
@@ -667,4 +676,11 @@ class JointC2FRewardManager(RewardManagerBase):
                 if self._step % self._save_steps == 0:
                     self._save_checkpoint()
 
-        return {"reward_score": float(reward)}
+        return {
+            "reward_score": float(reward),
+            "reward_extra_info": {
+                "p_loss": float(sample_loss.detach().cpu().item()),
+                "malformed": 0.0,
+                "validate": 1.0 if is_validate else 0.0,
+            },
+        }
