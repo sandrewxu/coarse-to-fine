@@ -35,6 +35,13 @@ outputs/
 # W&B
 wandb/
 
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
 # OS
 .DS_Store
 Thumbs.db

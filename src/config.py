@@ -13,12 +13,12 @@ Usage::
     config = load_config("config/latent_generation.yaml")
     # config is a plain dict with all defaults filled in
 """
+
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Section models
@@ -227,7 +227,7 @@ class ExperimentConfig(BaseModel):
     @property
     def word_count_constraints(self) -> dict[str, int]:
         """Derived from ``scale_lengths[:-1]`` -- not specified in YAML."""
-        return dict(zip(_LATENT_LAYER_NAMES, self.scale_lengths[:-1]))
+        return dict(zip(_LATENT_LAYER_NAMES, self.scale_lengths[:-1], strict=False))
 
     @property
     def text_word_count(self) -> int:

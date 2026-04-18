@@ -11,6 +11,7 @@ Usage:
     python scripts/08_eval_joint.py --checkpoint checkpoints/rl/joint/c2f/step_100
     python scripts/08_eval_joint.py --checkpoint checkpoints/decoder --num-samples 20
 """
+
 import argparse
 import sys
 from collections import Counter
@@ -18,21 +19,33 @@ from pathlib import Path
 
 import torch
 
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate C2F posterior collapse")
-    parser.add_argument("--checkpoint", required=True, type=Path, help="C2F model checkpoint directory")
-    parser.add_argument("--tokenizer-dir", type=Path, default=None, help="Space tokenizer directory")
-    parser.add_argument("--num-samples", type=int, default=10, help="Number of sequences to generate")
+    parser.add_argument(
+        "--checkpoint", required=True, type=Path, help="C2F model checkpoint directory"
+    )
+    parser.add_argument(
+        "--tokenizer-dir", type=Path, default=None, help="Space tokenizer directory"
+    )
+    parser.add_argument(
+        "--num-samples", type=int, default=10, help="Number of sequences to generate"
+    )
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
-    parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "config" / "latent_generation.yaml")
+    parser.add_argument(
+        "--config", type=Path, default=PROJECT_ROOT / "config" / "latent_generation.yaml"
+    )
     args = parser.parse_args()
 
     if not args.checkpoint.exists():
-        print(f"Error: Checkpoint not found: {args.checkpoint}", file=sys.stderr)
+        log.error(f"Checkpoint not found: {args.checkpoint}")
         return 1
 
     from src.config import load_config
@@ -44,12 +57,13 @@ def main() -> int:
     from src.qwen3_joint.configuration import C2FConfig
     from src.qwen3_joint.modeling import C2FForCausalLM
 
-    print(f"Loading C2F model from {args.checkpoint} (causal mode)...")
+    log.info(f"Loading C2F model from {args.checkpoint} (causal mode)...")
     model_config = C2FConfig.from_pretrained(str(args.checkpoint))
     model_config.mask_type = "causal"
     model = C2FForCausalLM(model_config)
 
     from src.rl.reward import _load_c2f_weights
+
     model = _load_c2f_weights(model, args.checkpoint)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -75,7 +89,7 @@ def main() -> int:
 
     # ── Generate ─────────────────────────────────────────────────────────────
     content_len = 1 + sum(scale_lengths)  # BOS + all scales
-    print(f"Generating {args.num_samples} sequences ({content_len} tokens each)...\n")
+    log.info(f"Generating {args.num_samples} sequences ({content_len} tokens each)...\n")
 
     scale_names = ["z_4", "z_3", "z_2", "z_1", "text"]
     all_z_tokens: list[str] = []
@@ -96,16 +110,16 @@ def main() -> int:
         generated_ids = output[0].cpu().tolist()
 
         # Split into scale segments
-        print(f"--- Sample {i + 1} ---")
+        log.info(f"--- Sample {i + 1} ---")
         pos = 1  # skip BOS
-        for name, length in zip(scale_names, scale_lengths):
+        for name, length in zip(scale_names, scale_lengths, strict=False):
             segment_ids = generated_ids[pos : pos + length]
             segment_text = tokenizer.decode(segment_ids, skip_special_tokens=True)
-            print(f"  {name:>4s}: {segment_text}")
+            log.info(f"  {name:>4s}: {segment_text}")
             if name != "text":
                 all_z_tokens.extend(segment_text.split())
             pos += length
-        print()
+        log.info()
 
     # ── Collapse metrics ─────────────────────────────────────────────────────
     if all_z_tokens:
@@ -114,16 +128,16 @@ def main() -> int:
         counter = Counter(all_z_tokens)
         top5 = counter.most_common(5)
 
-        print("=" * 50)
-        print("Collapse Metrics")
-        print("=" * 50)
-        print(f"  Total z tokens:  {total}")
-        print(f"  Unique z tokens: {unique} ({unique / total:.1%})")
-        print(f"  Top 5 z tokens:  {top5}")
+        log.info("=" * 50)
+        log.info("Collapse Metrics")
+        log.info("=" * 50)
+        log.info(f"  Total z tokens:  {total}")
+        log.info(f"  Unique z tokens: {unique} ({unique / total:.1%})")
+        log.info(f"  Top 5 z tokens:  {top5}")
         if unique / total < 0.1:
-            print("  --> COLLAPSED: z tokens are highly degenerate")
+            log.info("  --> COLLAPSED: z tokens are highly degenerate")
         else:
-            print("  --> NOT collapsed: z tokens show diversity")
+            log.info("  --> NOT collapsed: z tokens show diversity")
 
     return 0
 

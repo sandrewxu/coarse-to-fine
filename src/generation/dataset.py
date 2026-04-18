@@ -3,6 +3,7 @@ Data utilities for step 5 (local latent generation).
 
 Loading prompts, saving outputs, verification, and C2F flattening.
 """
+
 import json
 import re
 from pathlib import Path
@@ -68,7 +69,7 @@ def save_generation_outputs(
     output_dir.mkdir(parents=True, exist_ok=True)
     records = [
         {"generated_id": f"gen-{i:06d}", "prompt": p, "response": o}
-        for i, (p, o) in enumerate(zip(prompts, outputs))
+        for i, (p, o) in enumerate(zip(prompts, outputs, strict=False))
     ]
     ds = Dataset.from_list(records)
     path = output_dir / filename
@@ -99,10 +100,12 @@ def verify_and_filter_outputs(
     filtered_prompts = []
     filtered_outputs = []
 
-    for i, (prompt, output) in enumerate(zip(prompts, outputs)):
+    for i, (prompt, output) in enumerate(zip(prompts, outputs, strict=False)):
         result = verify(
-            output, word_count_constraints,
-            custom_id=f"gen-{i:06d}", strict_word_count=strict,
+            output,
+            word_count_constraints,
+            custom_id=f"gen-{i:06d}",
+            strict_word_count=strict,
         )
 
         stats.total_processed += 1
@@ -144,7 +147,7 @@ def flatten_for_c2f(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     records = []
-    for prompt, response in zip(prompts, responses):
+    for prompt, response in zip(prompts, responses, strict=False):
         layer_contents = []
         for line in response.strip().split("\n"):
             line = line.strip()
@@ -153,7 +156,7 @@ def flatten_for_c2f(
             match = _LAYER_RE.match(line)
             if match:
                 layer_contents.append(match.group(1).strip())
-        flat_text = " ".join(layer_contents + [prompt])
+        flat_text = " ".join([*layer_contents, prompt])
         records.append({"text": flat_text})
 
     ds = Dataset.from_list(records)

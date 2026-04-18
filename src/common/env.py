@@ -5,6 +5,7 @@ Loads .env from the project root and configures W&B from the experiment config.
 All scripts should call ``load_env()`` early, then ``setup_wandb(config)`` before
 any training to ensure W&B is properly initialized.
 """
+
 import os
 from pathlib import Path
 from typing import Any
@@ -83,11 +84,11 @@ def setup_wandb(config: dict[str, Any], step_name: str | None = None) -> bool:
     # WandB requires API keys to be 40+ characters; invalid/placeholder keys cause a crash later
     api_key = os.environ.get("WANDB_API_KEY", "").strip()
     if not api_key or len(api_key) < 40:
-        import sys
-        print(
+        from src.common.logging import get_logger
+
+        get_logger(__name__).warning(
             "W&B disabled: WANDB_API_KEY is missing or too short (WandB requires 40+ chars). "
-            "Get a key from https://wandb.ai/authorize and set it in .env.",
-            file=sys.stderr,
+            "Get a key from https://wandb.ai/authorize and set it in .env."
         )
         os.environ.setdefault("WANDB_DISABLED", "true")
         return False
@@ -113,7 +114,7 @@ def setup_wandb(config: dict[str, Any], step_name: str | None = None) -> bool:
 
     tags = wandb_config.get("tags", [])
     if step_name:
-        tags = tags + [step_name]
+        tags = [*tags, step_name]
     if tags:
         os.environ["WANDB_TAGS"] = ",".join(str(t) for t in tags)
 

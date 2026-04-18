@@ -29,12 +29,17 @@ Usage:
         --config config/latent_generation.yaml \
         --resume-from checkpoints/decoder/checkpoint-500
 """
+
 import argparse
 import os
 import sys
 from pathlib import Path
 
 import pyarrow.parquet as pq
+
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -57,20 +62,38 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Train C2F decoder model")
     # Essential inputs
     parser.add_argument("--data", required=True, type=Path, help="Training parquet file")
-    parser.add_argument("--init-from", type=str, default=None, help="Model init source: 'random' or checkpoint/HF path (default: from config or 'random')")
-    parser.add_argument("--config", type=Path, default=None, help="Experiment YAML for defaults and W&B")
-    parser.add_argument("--resume-from", type=str, default=None, help="Resume from checkpoint directory")
+    parser.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="Model init source: 'random' or checkpoint/HF path (default: from config or 'random')",
+    )
+    parser.add_argument(
+        "--config", type=Path, default=None, help="Experiment YAML for defaults and W&B"
+    )
+    parser.add_argument(
+        "--resume-from", type=str, default=None, help="Resume from checkpoint directory"
+    )
     # Training overrides
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
-    parser.add_argument("--batch-size", type=int, default=None, help="Override per-device batch size")
-    parser.add_argument("--checkpoint-dir", type=Path, default=None, help="Override checkpoint output directory")
-    parser.add_argument("--mask-type", type=str, default=None, choices=["block", "causal"],
-                        help="Attention mask: 'block' (C2F prefix) or 'causal' (standard autoregressive)")
+    parser.add_argument(
+        "--batch-size", type=int, default=None, help="Override per-device batch size"
+    )
+    parser.add_argument(
+        "--checkpoint-dir", type=Path, default=None, help="Override checkpoint output directory"
+    )
+    parser.add_argument(
+        "--mask-type",
+        type=str,
+        default=None,
+        choices=["block", "causal"],
+        help="Attention mask: 'block' (C2F prefix) or 'causal' (standard autoregressive)",
+    )
     args = parser.parse_args()
 
     if not args.data.exists():
-        print(f"Error: Data file not found: {args.data}", file=sys.stderr)
+        log.error(f"Data file not found: {args.data}")
         return 1
 
     # Load config for defaults (or use empty)
@@ -79,10 +102,11 @@ def main() -> int:
 
     if args.config:
         if not args.config.exists():
-            print(f"Error: Config not found: {args.config}", file=sys.stderr)
+            log.error(f"Config not found: {args.config}")
             return 1
+        from src.common.env import load_env, setup_wandb
         from src.config import load_config
-        from src.utils.env import load_env, setup_wandb
+
         load_env()
         config = load_config(args.config)
         wandb_enabled = setup_wandb(config, step_name="c2f-pretrain")
@@ -108,7 +132,7 @@ def main() -> int:
     dataset_dir = data_path.parent
     parquet_filename = data_path.name
     dataset_format = detect_dataset_format(data_path)
-    print(f"Dataset: {data_path} (format={dataset_format})")
+    log.info(f"Dataset: {data_path} (format={dataset_format})")
 
     # Tokenizer
     from src.c2f_training.dataset import C2FDataset
@@ -120,6 +144,7 @@ def main() -> int:
 
     if tokenizer_type == "space":
         from src.c2f_training.tokenizer import load_or_train_space_tokenizer
+
         tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
         if not tokenizer_dir.is_absolute():
             tokenizer_dir = PROJECT_ROOT / tokenizer_dir
@@ -130,26 +155,30 @@ def main() -> int:
             parquet_filename=parquet_filename,
         )
         vocab_size = tokenizer.vocab_size
-        print(f"  Space tokenizer ready (vocab_size={vocab_size})")
+        log.info(f"  Space tokenizer ready (vocab_size={vocab_size})")
 
     # Init W&B (main process only)
     wandb_run = None
     if wandb_enabled and os.environ.get("LOCAL_RANK", "0") == "0":
         import wandb
+
         wandb_run = wandb.init(
             name=c2f_cfg.get("run_name", "c2f-pretrain"),
-            config={"step": "06-c2f-pretrain", "c2f_training": c2f_cfg,
-                    "scale_lengths": config.get("scale_lengths")},
+            config={
+                "step": "06-c2f-pretrain",
+                "c2f_training": c2f_cfg,
+                "scale_lengths": config.get("scale_lengths"),
+            },
         )
 
     # Load model
-    print(f"Loading C2F model (init_from={c2f_cfg.get('init_from', 'random')})...")
+    log.info(f"Loading C2F model (init_from={c2f_cfg.get('init_from', 'random')})...")
     model = load_c2f_model(config, vocab_size=vocab_size)
     param_count = sum(p.numel() for p in model.parameters())
-    print(f"  Parameters: {param_count:,}")
+    log.info(f"  Parameters: {param_count:,}")
 
     # Build dataset
-    print(f"Building dataset...")
+    log.info("Building dataset...")
     full_dataset = C2FDataset(
         data_dir=str(dataset_dir),
         tokenizer_name_or_path=c2f_cfg.get("init_from", "Qwen/Qwen3-4B"),
@@ -164,7 +193,7 @@ def main() -> int:
     # Split
     eval_split = c2f_cfg.get("eval_split", 0.05)
     splits = full_dataset.train_test_split(test_size=eval_split, seed=c2f_cfg.get("seed", 42))
-    print(f"  Train: {len(splits['train'])}, Eval: {len(splits['test'])}")
+    log.info(f"  Train: {len(splits['train'])}, Eval: {len(splits['test'])}")
 
     # Train
     training_args = build_training_args(config, PROJECT_ROOT, wandb_enabled=wandb_enabled)
@@ -177,10 +206,10 @@ def main() -> int:
         mask_type=c2f_cfg.get("mask_type", "block"),
     )
 
-    print("Starting training...")
+    log.info("Starting training...")
     trainer.train(resume_from_checkpoint=args.resume_from)
     trainer.save_model()
-    print(f"Model saved to: {training_args.output_dir}")
+    log.info(f"Model saved to: {training_args.output_dir}")
 
     if wandb_run is not None:
         wandb_run.finish()

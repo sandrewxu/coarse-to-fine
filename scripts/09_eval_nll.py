@@ -52,6 +52,7 @@ Examples
         --test data/local_generations/c2f_test.parquet \\
         --K 1
 """
+
 import argparse
 import json
 import math
@@ -62,6 +63,10 @@ from typing import Any
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -76,9 +81,7 @@ def _load_space_tokenizer(config: dict[str, Any], tokenizer_dir: Path | None = N
 
     c2f_cfg = config.get("c2f_training", {})
     if tokenizer_dir is None:
-        tokenizer_dir = Path(
-            c2f_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer")
-        )
+        tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
     if not tokenizer_dir.is_absolute():
         tokenizer_dir = PROJECT_ROOT / tokenizer_dir
 
@@ -154,16 +157,15 @@ def eval_ar(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
 
     # Tokenizer: repo's space tokenizer (1 word = 1 token).
     tokenizer = _load_space_tokenizer(config, args.tokenizer_dir)
-    pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id
 
-    print(f"Loading AR model from {args.ckpt}...")
+    log.error(f"Loading AR model from {args.ckpt}...")
     model = AutoModelForCausalLM.from_pretrained(str(args.ckpt), trust_remote_code=True)
     model.to(device)
     model.eval()
     _check_vocab_consistency(model.config.vocab_size, tokenizer.vocab_size)
 
     docs = _load_ar_jsonl(args.test, args.limit)
-    print(f"Scoring {len(docs)} documents...")
+    log.info(f"Scoring {len(docs)} documents...")
 
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
     per_doc_nll = np.empty(len(docs), dtype=np.float64)
@@ -174,14 +176,12 @@ def eval_ar(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
         ids = tokenizer.encode(text, add_special_tokens=False)
         # BOS prefix so logits[0] can be used to predict the first word.
         bos = tokenizer.bos_token_id or tokenizer.eos_token_id
-        ids = [bos] + ids
+        ids = [bos, *ids]
         input_ids = torch.tensor(ids, dtype=torch.long, device=device).unsqueeze(0)
         out = model(input_ids=input_ids)
         logits = out.logits[:, :-1, :]  # predict positions 1..T
         targets = input_ids[:, 1:]
-        per_tok = loss_fn(
-            logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
-        )
+        per_tok = loss_fn(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
         nll = float(per_tok.sum().item())
         n_tok = int(targets.numel())
         per_doc_nll[i] = nll
@@ -203,12 +203,11 @@ def eval_ar(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
 # ─── C2F path ──────────────────────────────────────────────────────────────
 
 
-def _build_c2f_dataset(
-    test_path: Path, config: dict[str, Any], tokenizer
-) -> Any:
+def _build_c2f_dataset(test_path: Path, config: dict[str, Any], tokenizer) -> Any:
     """Build a C2FDataset over the test parquet."""
-    from src.c2f_training.dataset import C2FDataset
     import pyarrow.parquet as pq
+
+    from src.c2f_training.dataset import C2FDataset
 
     cols = pq.read_schema(str(test_path)).names
     if "text" in cols:
@@ -260,7 +259,7 @@ def eval_c2f(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]
 
     tokenizer = _load_space_tokenizer(config, args.tokenizer_dir)
 
-    print(f"Loading C2F model from {args.ckpt}...")
+    log.info(f"Loading C2F model from {args.ckpt}...")
     model_config = C2FConfig.from_pretrained(str(args.ckpt))
     model = C2FForCausalLM(model_config)
     model = _load_c2f_weights(model, args.ckpt)
@@ -274,7 +273,7 @@ def eval_c2f(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]
 
         dataset = Subset(dataset, range(min(args.limit, len(dataset))))
 
-    print(f"Scoring {len(dataset)} documents...")
+    log.info(f"Scoring {len(dataset)} documents...")
 
     scale_names = ["z_4", "z_3", "z_2", "z_1", "text"]
     scale_ranges = _scale_ranges(config["scale_lengths"])
@@ -314,7 +313,7 @@ def eval_c2f(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]
             per_doc_nll[idx] = float(doc_nll[b])
             per_doc_tokens[idx] = int(doc_tok[b])
             per_doc_scales: dict[str, float] = {}
-            for name, (start, end) in zip(scale_names, scale_ranges):
+            for name, (start, end) in zip(scale_names, scale_ranges, strict=False):
                 if mask_type == "causal":
                     s_slice = slice(start - 1, end - 1)
                 else:
@@ -375,23 +374,23 @@ def _print_summary(result: dict[str, Any]) -> None:
     lo, hi = result["nats_per_word_ci95"]
     bits = mean / math.log(2)
     ppl = math.exp(mean)
-    print()
-    print("=" * 60)
-    print(f"  model_kind       = {result['model_kind']}")
-    print(f"  ckpt             = {result['ckpt']}")
+    log.info()
+    log.info("=" * 60)
+    log.info(f"  model_kind       = {result['model_kind']}")
+    log.info(f"  ckpt             = {result['ckpt']}")
     if "mask_type" in result:
-        print(f"  mask_type        = {result['mask_type']}")
+        log.info(f"  mask_type        = {result['mask_type']}")
     if "K" in result:
-        print(f"  IWAE K           = {result['K']}")
-    print(f"  num_docs         = {result['num_docs']}")
-    print(f"  total_tokens     = {result['total_tokens']}")
-    print(f"  nats/word        = {mean:.4f}  (bits/word = {bits:.4f}, ppl = {ppl:.2f})")
-    print(f"  95% CI (nats/w)  = [{lo:.4f}, {hi:.4f}]")
+        log.info(f"  IWAE K           = {result['K']}")
+    log.info(f"  num_docs         = {result['num_docs']}")
+    log.info(f"  total_tokens     = {result['total_tokens']}")
+    log.info(f"  nats/word        = {mean:.4f}  (bits/word = {bits:.4f}, ppl = {ppl:.2f})")
+    log.info(f"  95% CI (nats/w)  = [{lo:.4f}, {hi:.4f}]")
     if "per_scale_nats_per_token" in result:
-        print("  per-scale nats/token:")
+        log.info("  per-scale nats/token:")
         for name, val in result["per_scale_nats_per_token"].items():
-            print(f"    {name:>5s}: {val:.4f}")
-    print("=" * 60)
+            log.info(f"    {name:>5s}: {val:.4f}")
+    log.info("=" * 60)
 
 
 def main() -> int:
@@ -433,10 +432,10 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.ckpt.exists():
-        print(f"Error: ckpt not found: {args.ckpt}", file=sys.stderr)
+        log.error(f"ckpt not found: {args.ckpt}")
         return 1
     if not args.test.exists():
-        print(f"Error: test file not found: {args.test}", file=sys.stderr)
+        log.error(f"test file not found: {args.test}")
         return 1
 
     from src.config import load_config
@@ -450,7 +449,7 @@ def main() -> int:
 
     if args.out_jsonl is not None:
         _save_per_doc(args.out_jsonl, result["per_doc_rows"])
-        print(f"Per-doc rows saved to {args.out_jsonl}")
+        log.info(f"Per-doc rows saved to {args.out_jsonl}")
 
     return 0
 

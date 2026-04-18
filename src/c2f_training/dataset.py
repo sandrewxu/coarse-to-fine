@@ -15,6 +15,7 @@ Supports two input formats controlled by ``dataset_format``:
 Output: PyTorch tensors with layout [BOS | scale_0 | scale_1 | ... | padding],
         where each scale occupies exactly scale_lengths[k] token positions.
 """
+
 import math
 import re
 from pathlib import Path
@@ -54,8 +55,8 @@ class C2FDataset(TorchDataset):
         self,
         data_dir: str | Path,
         tokenizer_name_or_path: str = "",
-        scale_lengths: list[int] = None,
-        word_count_constraints: dict[str, int] = None,
+        scale_lengths: list[int] | None = None,
+        word_count_constraints: dict[str, int] | None = None,
         text_word_count: int = 32,
         parquet_filename: str | None = None,
         dataset_format: str = "c2f",
@@ -109,15 +110,11 @@ class C2FDataset(TorchDataset):
 
         # Resolve default parquet filename based on format
         if parquet_filename is None:
-            parquet_filename = (
-                "c2f_train.parquet" if dataset_format == "c2f" else "train.parquet"
-            )
+            parquet_filename = "c2f_train.parquet" if dataset_format == "c2f" else "train.parquet"
 
         data_dir = Path(data_dir)
         parquet_path = data_dir / parquet_filename
-        self.dataset = load_dataset(
-            "parquet", data_files=str(parquet_path), split="train"
-        )
+        self.dataset = load_dataset("parquet", data_files=str(parquet_path), split="train")
 
         # Token IDs
         self.bos_id = self.tokenizer.bos_token_id
@@ -138,7 +135,7 @@ class C2FDataset(TorchDataset):
 
         # SFT format: parse z_n: labels from response, append prompt words
         layer_contents = _parse_sft_response(row["response"])
-        flat_text = " ".join(layer_contents + [row["prompt"]])
+        flat_text = " ".join([*layer_contents, row["prompt"]])
         return flat_text.split()
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
@@ -156,8 +153,8 @@ class C2FDataset(TorchDataset):
         """
         tokens = [self.bos_id]
 
-        for k, ((start, end), length) in enumerate(
-            zip(self.word_boundaries, self.scale_lengths)
+        for _k, ((start, end), length) in enumerate(
+            zip(self.word_boundaries, self.scale_lengths, strict=False)
         ):
             segment_words = words[start:end]
             segment_text = " ".join(segment_words)
@@ -201,9 +198,7 @@ class C2FDataset(TorchDataset):
 
         return labels
 
-    def train_test_split(
-        self, test_size: float = 0.05, seed: int = 42
-    ) -> dict[str, "C2FDataset"]:
+    def train_test_split(self, test_size: float = 0.05, seed: int = 42) -> dict[str, "C2FDataset"]:
         """
         Split into train and test sets.
 

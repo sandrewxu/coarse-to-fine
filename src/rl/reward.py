@@ -18,6 +18,7 @@ stored in the experiment YAML (``config/latent_generation.yaml``),
 which is located via the ``C2F_CONFIG_PATH`` environment variable (set by the
 SLURM/launch script before torchrun) or defaults to the repo-relative path.
 """
+
 import asyncio
 import math
 import os
@@ -26,13 +27,15 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from transformers import AutoTokenizer
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
 
 from src.c2f_training.tokenizer import load_or_train_space_tokenizer
+from src.common.logging import get_logger
 from src.qwen3_joint.configuration import C2FConfig
 from src.qwen3_joint.modeling import C2FForCausalLM
 from src.verification import verify as verify_layers
+
+log = get_logger(__name__)
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
@@ -99,7 +102,7 @@ class C2FRewardManager(RewardManagerBase):
         # ── Frozen C2F model ─────────────────────────────────────────────────
         c2f_checkpoint = rl_cfg.get("c2f_model_path", "checkpoints/decoder")
         c2f_checkpoint = Path(c2f_checkpoint)
-        print(f"[C2FRewardManager] Loading frozen C2F from {c2f_checkpoint}...")
+        log.info(f"[C2FRewardManager] Loading frozen C2F from {c2f_checkpoint}...")
         model_config = C2FConfig.from_pretrained(str(c2f_checkpoint))
         self.c2f_model = C2FForCausalLM(model_config)
         self.c2f_model = _load_c2f_weights(self.c2f_model, c2f_checkpoint)
@@ -110,10 +113,8 @@ class C2FRewardManager(RewardManagerBase):
 
         # ── Space tokenizer (word-level, 1 word = 1 token) ──────────────────
         c2f_train_cfg = self.exp_config.get("c2f_training", {})
-        tokenizer_dir = Path(
-            c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer")
-        )
-        print(f"[C2FRewardManager] Loading space tokenizer from {tokenizer_dir}...")
+        tokenizer_dir = Path(c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
+        log.info(f"[C2FRewardManager] Loading space tokenizer from {tokenizer_dir}...")
         self.space_tokenizer = load_or_train_space_tokenizer(
             tokenizer_dir=tokenizer_dir,
             data_dir=c2f_train_cfg.get("dataset_dir", "data/sft_dataset"),
@@ -121,15 +122,13 @@ class C2FRewardManager(RewardManagerBase):
         )
 
         # ── Verification config ─────────────────────────────────────────────
-        self.strict_word_count = self.exp_config.get("verification", {}).get("strict_word_count", True)
+        self.strict_word_count = self.exp_config.get("verification", {}).get(
+            "strict_word_count", True
+        )
 
         # ── Token ID shortcuts ───────────────────────────────────────────────
-        self.bos_id = (
-            self.space_tokenizer.bos_token_id or self.space_tokenizer.eos_token_id
-        )
-        self.pad_id = (
-            self.space_tokenizer.pad_token_id or self.space_tokenizer.eos_token_id
-        )
+        self.bos_id = self.space_tokenizer.bos_token_id or self.space_tokenizer.eos_token_id
+        self.pad_id = self.space_tokenizer.pad_token_id or self.space_tokenizer.eos_token_id
         self.seq_len = 2 ** math.ceil(math.log2(1 + sum(self.scale_lengths)))
 
         # ── Word boundaries for flat sequence segmentation ───────────────────
@@ -158,7 +157,8 @@ class C2FRewardManager(RewardManagerBase):
         """
         cleaned = self._strip_think(response)
         result = verify_layers(
-            cleaned, self.word_count_constraints,
+            cleaned,
+            self.word_count_constraints,
             strict_word_count=self.strict_word_count,
         )
         if not result.passed:
@@ -174,7 +174,8 @@ class C2FRewardManager(RewardManagerBase):
         """
         cleaned = self._strip_think(response)
         result = verify_layers(
-            cleaned, self.word_count_constraints,
+            cleaned,
+            self.word_count_constraints,
             strict_word_count=self.strict_word_count,
         )
         if result.passed:
@@ -203,11 +204,11 @@ class C2FRewardManager(RewardManagerBase):
         Returns:
             (input_ids, labels) tensors of shape [seq_len].
         """
-        flat_parts = layer_contents + [prompt]
+        flat_parts = [*layer_contents, prompt]
         words = " ".join(flat_parts).split()
 
         tokens = [self.bos_id]
-        for (start, end), length in zip(self.word_boundaries, self.scale_lengths):
+        for (start, end), length in zip(self.word_boundaries, self.scale_lengths, strict=False):
             segment_text = " ".join(words[start:end])
             encoded = self.space_tokenizer.encode(segment_text, add_special_tokens=False)
             if len(encoded) >= length:
@@ -281,7 +282,7 @@ class C2FRewardManager(RewardManagerBase):
         reward_tensor = torch.zeros(batch_size, response_len, dtype=torch.float32)
         pad_id = getattr(self.sft_tokenizer, "pad_token_id", None)
 
-        for i, (response, prompt) in enumerate(zip(response_strs, ground_truths)):
+        for i, (response, prompt) in enumerate(zip(response_strs, ground_truths, strict=False)):
             # 1. Parse latent layers from SFT output
             layer_contents = self._parse_layers(response)
             if layer_contents is None:
@@ -316,7 +317,8 @@ class C2FRewardManager(RewardManagerBase):
         data_item = data[0]
         response_ids = data_item.batch["responses"]
         response_str = self.sft_tokenizer.decode(
-            response_ids.tolist(), skip_special_tokens=True,
+            response_ids.tolist(),
+            skip_special_tokens=True,
         )
 
         nt = data_item.non_tensor_batch
@@ -328,11 +330,12 @@ class C2FRewardManager(RewardManagerBase):
 
         if not getattr(type(self), "_debug_dumped", False):
             type(self)._debug_dumped = True
-            print(
-                f"[C2FRewardManager DEBUG] first sample:\n"
-                f"  response (len={len(response_str)}): {response_str[:800]!r}\n"
-                f"  ground_truth (len={len(str(gt))}): {str(gt)[:300]!r}",
-                flush=True,
+            log.debug(
+                "first sample: response (len=%d) %r | ground_truth (len=%d) %r",
+                len(response_str),
+                response_str[:800],
+                len(str(gt)),
+                str(gt)[:300],
             )
 
         layer_contents = self._parse_layers(response_str)
@@ -409,7 +412,9 @@ class JointC2FRewardManager(RewardManagerBase):
         # ── Trainable C2F model ─────────────────────────────────────────────
         c2f_checkpoint = Path(joint_cfg.get("c2f_model_path", "checkpoints/decoder"))
         mask_type = joint_cfg.get("c2f_mask_type", "causal")
-        print(f"[JointC2FRewardManager] Loading C2F from {c2f_checkpoint} (mask_type={mask_type})...")
+        log.info(
+            f"[JointC2FRewardManager] Loading C2F from {c2f_checkpoint} (mask_type={mask_type})..."
+        )
         model_config = C2FConfig.from_pretrained(str(c2f_checkpoint))
         model_config.mask_type = mask_type
         self.c2f_model = C2FForCausalLM(model_config)
@@ -420,16 +425,16 @@ class JointC2FRewardManager(RewardManagerBase):
         self.c2f_model.train()
 
         self.optimizer = torch.optim.AdamW(
-            self.c2f_model.parameters(), lr=c2f_lr, weight_decay=c2f_wd,
+            self.c2f_model.parameters(),
+            lr=c2f_lr,
+            weight_decay=c2f_wd,
         )
         self._step = 0
 
         # ── Space tokenizer ─────────────────────────────────────────────────
         c2f_train_cfg = self.exp_config.get("c2f_training", {})
-        tokenizer_dir = Path(
-            c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer")
-        )
-        print(f"[JointC2FRewardManager] Loading space tokenizer from {tokenizer_dir}...")
+        tokenizer_dir = Path(c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
+        log.info(f"[JointC2FRewardManager] Loading space tokenizer from {tokenizer_dir}...")
         self.space_tokenizer = load_or_train_space_tokenizer(
             tokenizer_dir=tokenizer_dir,
             data_dir=c2f_train_cfg.get("dataset_dir", "data/sft_dataset"),
@@ -438,16 +443,13 @@ class JointC2FRewardManager(RewardManagerBase):
 
         # ── Verification config ─────────────────────────────────────────────
         self.strict_word_count = self.exp_config.get("verification", {}).get(
-            "strict_word_count", True,
+            "strict_word_count",
+            True,
         )
 
         # ── Token ID shortcuts ───────────────────────────────────────────────
-        self.bos_id = (
-            self.space_tokenizer.bos_token_id or self.space_tokenizer.eos_token_id
-        )
-        self.pad_id = (
-            self.space_tokenizer.pad_token_id or self.space_tokenizer.eos_token_id
-        )
+        self.bos_id = self.space_tokenizer.bos_token_id or self.space_tokenizer.eos_token_id
+        self.pad_id = self.space_tokenizer.pad_token_id or self.space_tokenizer.eos_token_id
         self.seq_len = 2 ** math.ceil(math.log2(1 + sum(self.scale_lengths)))
 
         # ── Word boundaries ─────────────────────────────────────────────────
@@ -462,8 +464,10 @@ class JointC2FRewardManager(RewardManagerBase):
 
         self._c2f_lock = asyncio.Lock()
 
-        print(f"[JointC2FRewardManager] Ready. p trainable on {self.device}, "
-              f"lr={c2f_lr}, malformed_reward={self.malformed_reward}")
+        log.info(
+            f"[JointC2FRewardManager] Ready. p trainable on {self.device}, "
+            f"lr={c2f_lr}, malformed_reward={self.malformed_reward}"
+        )
 
     # ── Helpers (same logic as C2FRewardManager) ────────────────────────────
 
@@ -473,7 +477,8 @@ class JointC2FRewardManager(RewardManagerBase):
     def _parse_layers(self, response: str) -> list[str] | None:
         cleaned = self._strip_think(response)
         result = verify_layers(
-            cleaned, self.word_count_constraints,
+            cleaned,
+            self.word_count_constraints,
             strict_word_count=self.strict_word_count,
         )
         if not result.passed:
@@ -481,13 +486,15 @@ class JointC2FRewardManager(RewardManagerBase):
         return [layer.content for layer in result.layers]
 
     def _build_c2f_input(
-        self, layer_contents: list[str], prompt: str,
+        self,
+        layer_contents: list[str],
+        prompt: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        flat_parts = layer_contents + [prompt]
+        flat_parts = [*layer_contents, prompt]
         words = " ".join(flat_parts).split()
 
         tokens = [self.bos_id]
-        for (start, end), length in zip(self.word_boundaries, self.scale_lengths):
+        for (start, end), length in zip(self.word_boundaries, self.scale_lengths, strict=False):
             segment_text = " ".join(words[start:end])
             encoded = self.space_tokenizer.encode(segment_text, add_special_tokens=False)
             if len(encoded) >= length:
@@ -514,23 +521,29 @@ class JointC2FRewardManager(RewardManagerBase):
             save_path.mkdir(parents=True, exist_ok=True)
             self.c2f_model.save_pretrained(str(save_path))
             torch.save(self.optimizer.state_dict(), save_path / "optimizer.pt")
-            print(f"[JointC2FRewardManager] Saved p checkpoint: {save_path}")
-        except Exception as e:
-            print(
-                f"[JointC2FRewardManager] WARNING: checkpoint save failed at "
-                f"{save_path}: {e!r}. Cleaning up partial save and continuing.",
-                flush=True,
+            log.info("Saved p checkpoint: %s", save_path)
+        except (OSError, RuntimeError) as e:
+            # OSError: disk full / permissions; RuntimeError: torch save / FSDP
+            # gather failure. Anything else is unexpected and should propagate.
+            log.warning(
+                "checkpoint save failed at %s: %r. Cleaning up partial save and continuing.",
+                save_path,
+                e,
             )
             shutil.rmtree(save_path, ignore_errors=True)
             return
 
         step_dirs = sorted(
-            (p for p in self._save_dir.iterdir()
-             if p.is_dir() and p.name.startswith("step_")
-             and p.name.removeprefix("step_").isdigit()),
+            (
+                p
+                for p in self._save_dir.iterdir()
+                if p.is_dir()
+                and p.name.startswith("step_")
+                and p.name.removeprefix("step_").isdigit()
+            ),
             key=lambda p: int(p.name.removeprefix("step_")),
         )
-        for old_dir in step_dirs[:-self._keep_last_n]:
+        for old_dir in step_dirs[: -self._keep_last_n]:
             shutil.rmtree(old_dir, ignore_errors=True)
 
     # ── veRL interface ──────────────────────────────────────────────────────
@@ -541,7 +554,8 @@ class JointC2FRewardManager(RewardManagerBase):
 
         # Decode response token IDs → strings
         response_strs: list[str] = self.sft_tokenizer.batch_decode(
-            data.batch["responses"], skip_special_tokens=True,
+            data.batch["responses"],
+            skip_special_tokens=True,
         )
         ground_truths = data.non_tensor_batch.get("ground_truth", [""] * batch_size)
         if hasattr(ground_truths, "tolist"):
@@ -552,7 +566,7 @@ class JointC2FRewardManager(RewardManagerBase):
         all_input_ids: list[torch.Tensor] = []
         all_labels: list[torch.Tensor] = []
 
-        for i, (response, prompt) in enumerate(zip(response_strs, ground_truths)):
+        for i, (response, prompt) in enumerate(zip(response_strs, ground_truths, strict=False)):
             layer_contents = self._parse_layers(response)
             if layer_contents is None:
                 continue
@@ -562,23 +576,25 @@ class JointC2FRewardManager(RewardManagerBase):
             all_labels.append(labels)
 
         reward_tensor = torch.full(
-            (batch_size, response_len), 0.0, dtype=torch.float32,
+            (batch_size, response_len),
+            0.0,
+            dtype=torch.float32,
         )
         num_valid = len(valid_indices)
         num_malformed = batch_size - num_valid
 
         # ── Phase 2: micro-batched forward + backward on p ──────────────────
         if num_valid > 0:
-            batch_ids = torch.stack(all_input_ids).to(self.device)    # [N, seq_len]
-            batch_labels = torch.stack(all_labels).to(self.device)    # [N, seq_len]
+            batch_ids = torch.stack(all_input_ids).to(self.device)  # [N, seq_len]
+            batch_labels = torch.stack(all_labels).to(self.device)  # [N, seq_len]
 
             # Micro-batch the C2F forward to avoid OOM when N is large
             c2f_micro_bs = 32
             all_per_sample_loss: list[torch.Tensor] = []
 
             for mb_start in range(0, num_valid, c2f_micro_bs):
-                mb_ids = batch_ids[mb_start:mb_start + c2f_micro_bs]
-                mb_labels = batch_labels[mb_start:mb_start + c2f_micro_bs]
+                mb_ids = batch_ids[mb_start : mb_start + c2f_micro_bs]
+                mb_labels = batch_labels[mb_start : mb_start + c2f_micro_bs]
 
                 # Forward without internal loss (avoid retaining unused graph)
                 mb_outputs = self.c2f_model(input_ids=mb_ids)
@@ -644,7 +660,7 @@ class JointC2FRewardManager(RewardManagerBase):
         self._step += 1
         avg_reward = per_sample_reward.mean().item() if num_valid > 0 else 0.0
         avg_loss = p_loss.item() if num_valid > 0 else 0.0
-        print(
+        log.info(
             f"[Joint] step={self._step}  valid={num_valid}/{batch_size}  "
             f"p_loss={avg_loss:.4f}  reward={avg_reward:.4f}"
         )
@@ -660,7 +676,8 @@ class JointC2FRewardManager(RewardManagerBase):
         data_item = data[0]
         response_ids = data_item.batch["responses"]
         response_str = self.sft_tokenizer.decode(
-            response_ids.tolist(), skip_special_tokens=True,
+            response_ids.tolist(),
+            skip_special_tokens=True,
         )
 
         nt = data_item.non_tensor_batch
@@ -672,11 +689,13 @@ class JointC2FRewardManager(RewardManagerBase):
 
         if not getattr(type(self), "_debug_dumped", False):
             type(self)._debug_dumped = True
-            print(
-                f"[JointC2FRewardManager DEBUG] first sample (validate={is_validate}):\n"
-                f"  response (len={len(response_str)}): {response_str[:800]!r}\n"
-                f"  ground_truth (len={len(str(gt))}): {str(gt)[:300]!r}",
-                flush=True,
+            log.debug(
+                "first sample (validate=%s): response (len=%d) %r | ground_truth (len=%d) %r",
+                is_validate,
+                len(response_str),
+                response_str[:800],
+                len(str(gt)),
+                str(gt)[:300],
             )
 
         layer_contents = self._parse_layers(response_str)

@@ -4,6 +4,18 @@ Most discrete diffusion approaches use a **fixed** forward process — independe
 
 This project takes a different route: **learn** the forward and reverse processes jointly by optimising the ELBO, as in a variational autoencoder, while making use of the strong natural-language prior of a pretrained autoregressive LM. The result is a coarse-to-fine generative process that first produces a high-level document summary $z_T$, then a slightly more detailed one $z_{T-1}$, and so on until generating a coherent document $x$. Because the hierarchy is learned rather than fixed, each latent level has a well-defined semantic interpretation.
 
+## Quick start
+
+```bash
+git clone <this-repo> && cd coarse-to-fine
+make install                              # uv sync --extra dev + pre-commit hooks
+cp .env.example .env && $EDITOR .env      # fill in WANDB / OpenAI / HF tokens
+make test                                 # smoke check the unit suite
+```
+
+For the full pipeline, jump to [Running the Pipeline](#running-the-pipeline).
+For agent / Claude Code orientation, see [`CLAUDE.md`](./CLAUDE.md).
+
 ---
 
 ## Table of Contents
@@ -299,6 +311,25 @@ Each pipeline step has its own optional dependency group to avoid unnecessary in
 pip install -e ".[sft]"        # Step 4 — veRL (used only in step 7A GRPO)
 pip install -e ".[generation]" # Step 5 — vLLM generation
 pip install -e ".[c2f]"        # Step 6 — C2F pretraining
+pip install -e ".[dev]"        # Ruff, pytest, pre-commit, nbstripout
+```
+
+For **contributor setup** (lint/format hooks):
+
+```bash
+make install     # uv sync --extra dev + pre-commit install
+```
+
+### HPC build note (flash-attn / vllm)
+
+On Yale HPC (H100), `flash-attn` and `vllm` wheels often need to be rebuilt from
+source against the cluster's CUDA/GCC toolchain. From an interactive GPU session:
+
+```bash
+ml load CUDA/12.8.0 GCC/13.3.0
+export TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=12 NVCC_THREADS=2
+export UV_PREFER_BINARY=1
+uv sync --extra generation --no-build-isolation
 ```
 
 ### Secrets
@@ -737,4 +768,4 @@ Enable W&B by setting `wandb.enabled: true` in the experiment YAML and providing
 | 8 — collapse | Unique/total $z$ token ratio, top-5 most common $z$ tokens (stdout) |
 | 9 — NLL | Aggregate nats/word + 95 % CI, per-scale nats/token for C2F, per-doc JSONL export |
 
-Each step adds a run tag (`sft`, `generation`, `c2f-pretrain`, `rl-sft`, `rl-c2f`) so runs are filterable in the W&B dashboard. All scripts call `load_env()` and `setup_wandb()` from `src/utils/env.py` before any training-framework imports.
+Each step adds a run tag (`sft`, `generation`, `c2f-pretrain`, `rl-sft`, `rl-c2f`) so runs are filterable in the W&B dashboard. All scripts call `load_env()` and `setup_wandb()` from `src/common/env.py` before any training-framework imports.

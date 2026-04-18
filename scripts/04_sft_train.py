@@ -17,10 +17,14 @@ Usage:
     accelerate launch --num_processes=2 scripts/04_sft_train.py \
         --data data/sft_dataset/train.parquet --config config/latent_generation.yaml
 """
+
 import argparse
-import os
 import sys
 from pathlib import Path
+
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -28,31 +32,39 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="SFT training with HuggingFace Trainer")
-    parser.add_argument("--data", required=True, type=Path, help="Training parquet (columns: prompt, response)")
+    parser.add_argument(
+        "--data", required=True, type=Path, help="Training parquet (columns: prompt, response)"
+    )
     parser.add_argument("--config", type=Path, default=None, help="Experiment YAML")
     parser.add_argument("--num-gpus", type=int, default=None, help="Number of GPUs")
     parser.add_argument("--epochs", type=int, default=None, help="Override epochs")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
-    parser.add_argument("--batch-size", type=int, default=None, help="Override per-device batch size")
-    parser.add_argument("--checkpoint-dir", type=Path, default=None, help="Override checkpoint directory")
+    parser.add_argument(
+        "--batch-size", type=int, default=None, help="Override per-device batch size"
+    )
+    parser.add_argument(
+        "--checkpoint-dir", type=Path, default=None, help="Override checkpoint directory"
+    )
     parser.add_argument("--resume-from", type=str, default=None, help="Resume from checkpoint")
     args = parser.parse_args()
 
     if not args.data.exists():
-        print(f"Error: Data file not found: {args.data}", file=sys.stderr)
+        log.error(f"Data file not found: {args.data}")
         return 1
 
     # Load config
-    from src.utils.env import load_env, setup_wandb
+    from src.common.env import load_env, setup_wandb
+
     load_env()
 
     sft_config: dict = {}
     wandb_enabled = False
     if args.config:
         if not args.config.exists():
-            print(f"Error: Config not found: {args.config}", file=sys.stderr)
+            log.error(f"Config not found: {args.config}")
             return 1
         from src.config import load_config
+
         config = load_config(args.config)
         sft_config = config.get("sft", {})
         wandb_enabled = setup_wandb(config, step_name="sft")
@@ -64,7 +76,9 @@ def main() -> int:
     lr = args.lr or sft_config.get("lr", 1e-5)
     per_device_batch = args.batch_size or sft_config.get("micro_batch_size_per_gpu", 4)
     train_batch_size = sft_config.get("train_batch_size", 16)
-    checkpoint_dir = args.checkpoint_dir or Path(sft_config.get("checkpoint_dir", "checkpoints/sft"))
+    checkpoint_dir = args.checkpoint_dir or Path(
+        sft_config.get("checkpoint_dir", "checkpoints/sft")
+    )
     if not checkpoint_dir.is_absolute():
         checkpoint_dir = PROJECT_ROOT / checkpoint_dir
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -83,34 +97,36 @@ def main() -> int:
     )
 
     # Load tokenizer and model
-    print(f"Loading model: {model_name}")
+    log.info(f"Loading model: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=torch.bfloat16, trust_remote_code=True,
+        model_name,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
     )
     model.gradient_checkpointing_enable()
 
     # Load dataset
-    print(f"Loading data: {args.data}")
+    log.info(f"Loading data: {args.data}")
     ds = load_dataset("parquet", data_files=str(args.data.resolve()), split="train")
 
     val_path = args.data.parent / "val.parquet"
     eval_ds = None
     if val_path.exists():
         eval_ds = load_dataset("parquet", data_files=str(val_path.resolve()), split="train")
-        print(f"  Train: {len(ds)}, Val: {len(eval_ds)}")
+        log.info(f"  Train: {len(ds)}, Val: {len(eval_ds)}")
     else:
-        print(f"  Train: {len(ds)} (no val split found)")
+        log.info(f"  Train: {len(ds)} (no val split found)")
 
     # Tokenize: format as chat (user=prompt, assistant=response), mask user tokens
     def tokenize(examples):
         all_input_ids = []
         all_labels = []
 
-        for prompt, response in zip(examples["prompt"], examples["response"]):
+        for prompt, response in zip(examples["prompt"], examples["response"], strict=False):
             messages = [
                 {"role": "user", "content": prompt},
                 {"role": "assistant", "content": response},
@@ -127,20 +143,21 @@ def main() -> int:
             prompt_ids = tokenizer(prompt_text, truncation=True, max_length=max_length)["input_ids"]
 
             # Labels: mask prompt tokens with -100, only train on response
-            labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids):]
+            labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
 
             all_input_ids.append(full_ids)
             all_labels.append(labels)
 
         return {"input_ids": all_input_ids, "labels": all_labels}
 
-    print("Tokenizing...")
+    log.info("Tokenizing...")
     ds = ds.map(tokenize, batched=True, remove_columns=ds.column_names)
     if eval_ds is not None:
         eval_ds = eval_ds.map(tokenize, batched=True, remove_columns=eval_ds.column_names)
 
     # Data collator with padding
     from transformers import DataCollatorForSeq2Seq
+
     collator = DataCollatorForSeq2Seq(tokenizer, padding=True)
 
     # Training args
@@ -173,11 +190,13 @@ def main() -> int:
         data_collator=collator,
     )
 
-    print(f"Starting SFT training: {epochs} epochs, batch={train_batch_size} (per_device={per_device_batch} x {grad_accum} accum x {num_gpus} gpu)")
+    log.info(
+        f"Starting SFT training: {epochs} epochs, batch={train_batch_size} (per_device={per_device_batch} x {grad_accum} accum x {num_gpus} gpu)"
+    )
     trainer.train(resume_from_checkpoint=args.resume_from)
     trainer.save_model()
     tokenizer.save_pretrained(str(checkpoint_dir))
-    print(f"Model saved to: {checkpoint_dir}")
+    log.info(f"Model saved to: {checkpoint_dir}")
 
     return 0
 

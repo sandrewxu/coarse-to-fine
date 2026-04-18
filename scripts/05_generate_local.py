@@ -22,9 +22,14 @@ Usage:
         --config config/latent_generation.yaml \
         --num-samples 1000
 """
+
 import argparse
 import sys
 from pathlib import Path
+
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -34,37 +39,62 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate latent outputs from SFT model")
     # Data source: --chunks (from dataset config) or --data (explicit parquet)
     data_group = parser.add_mutually_exclusive_group()
-    data_group.add_argument("--chunks", type=int, nargs="+", default=None,
-                            help="Chunk indices to generate from (e.g. 0 1 2 3)")
-    data_group.add_argument("--data", type=Path, default=None,
-                            help="Parquet file with 'prompt' column (backward compat)")
+    data_group.add_argument(
+        "--chunks",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Chunk indices to generate from (e.g. 0 1 2 3)",
+    )
+    data_group.add_argument(
+        "--data",
+        type=Path,
+        default=None,
+        help="Parquet file with 'prompt' column (backward compat)",
+    )
     parser.add_argument("--model", type=str, default=None, help="SFT model checkpoint path")
-    parser.add_argument("--output-dir", type=Path, default=None, help="Output directory for results")
-    parser.add_argument("--backend", default="vllm", choices=["vllm", "hf"], help="Generation backend (default: vllm)")
-    parser.add_argument("--num-gpus", type=int, default=1, help="Number of GPUs (vLLM tensor parallel)")
-    parser.add_argument("--num-samples", type=int, default=None, help="Generate for first N prompts only")
-    parser.add_argument("--config", type=Path, default=None, help="Experiment YAML for sampling params, verification, W&B")
+    parser.add_argument(
+        "--output-dir", type=Path, default=None, help="Output directory for results"
+    )
+    parser.add_argument(
+        "--backend",
+        default="vllm",
+        choices=["vllm", "hf"],
+        help="Generation backend (default: vllm)",
+    )
+    parser.add_argument(
+        "--num-gpus", type=int, default=1, help="Number of GPUs (vLLM tensor parallel)"
+    )
+    parser.add_argument(
+        "--num-samples", type=int, default=None, help="Generate for first N prompts only"
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Experiment YAML for sampling params, verification, W&B",
+    )
     args = parser.parse_args()
 
     # Load config for defaults (or use empty)
     config = {}
     gen_config = {}
     dataset_config = {}
-    wandb_enabled = False
 
     if args.config:
+        from src.common.env import load_env, setup_wandb
         from src.config import load_config
-        from src.utils.env import load_env, setup_wandb
+
         load_env()
         config = load_config(args.config)
         gen_config = config.get("generation", {})
         dataset_config = config.get("dataset", {})
-        wandb_enabled = setup_wandb(config, step_name="generation")
+        setup_wandb(config, step_name="generation")
 
     # Resolve model path
     model_path = args.model or gen_config.get("model_path", "")
     if not model_path:
-        print("Error: --model is required (or set generation.model_path in config)", file=sys.stderr)
+        log.error("--model is required (or set generation.model_path in config)")
         return 1
 
     # Resolve output dir
@@ -76,10 +106,11 @@ def main() -> int:
     if args.data is not None:
         # Backward compat: load from parquet
         if not args.data.exists():
-            print(f"Error: Data file not found: {args.data}", file=sys.stderr)
+            log.error(f"Data file not found: {args.data}")
             return 1
         from src.generation.dataset import load_prompts
-        print(f"Loading prompts from {args.data}...")
+
+        log.error(f"Loading prompts from {args.data}...")
         prompts = load_prompts(args.data)
     else:
         # Load from chunk files
@@ -90,20 +121,21 @@ def main() -> int:
             data_dir = str(PROJECT_ROOT / data_dir)
 
         from src.generation.dataset import load_documents_from_jsonl, resolve_chunk_paths
+
         chunk_paths = resolve_chunk_paths(data_dir, dataset_name, chunk_indices)
 
         # Verify all chunk files exist
         for p in chunk_paths:
             if not p.exists():
-                print(f"Error: Chunk file not found: {p}", file=sys.stderr)
+                log.error(f"Chunk file not found: {p}")
                 return 1
 
-        print(f"Loading documents from {len(chunk_paths)} chunks: {chunk_indices}...")
+        log.error(f"Loading documents from {len(chunk_paths)} chunks: {chunk_indices}...")
         prompts = load_documents_from_jsonl(chunk_paths)
 
     if args.num_samples and args.num_samples < len(prompts):
-        prompts = prompts[:args.num_samples]
-    print(f"  {len(prompts)} prompts loaded")
+        prompts = prompts[: args.num_samples]
+    log.info(f"  {len(prompts)} prompts loaded")
 
     # Build sampling kwargs from config defaults, CLI overrides take priority
     sampling_kwargs = {
@@ -122,33 +154,35 @@ def main() -> int:
 
     # Generate
     from src.generation.inference import generate
-    print(f"Generating with {args.backend} backend ({len(prompts)} prompts)...")
+
+    log.info(f"Generating with {args.backend} backend ({len(prompts)} prompts)...")
     outputs = generate(args.backend, model_path, prompts, **sampling_kwargs)
-    print(f"  Generated {len(outputs)} outputs")
+    log.info(f"  Generated {len(outputs)} outputs")
 
     # Save raw outputs
     from src.generation.dataset import save_generation_outputs
+
     raw_path = save_generation_outputs(prompts, outputs, output_dir)
-    print(f"  Raw generations saved to: {raw_path}")
+    log.info(f"  Raw generations saved to: {raw_path}")
 
     # Verify and flatten (if config provided with word_count_constraints)
     if config.get("word_count_constraints"):
         from src.generation.dataset import flatten_for_c2f, verify_and_filter_outputs
 
         if gen_config.get("verify_outputs", True):
-            print("Verifying outputs...")
+            log.info("Verifying outputs...")
             prompts, outputs, stats = verify_and_filter_outputs(prompts, outputs, config)
-            print(f"\n{stats}\n")
+            log.info(f"\n{stats}\n")
 
             if not outputs:
-                print("Error: No outputs passed verification.", file=sys.stderr)
+                log.error("No outputs passed verification.")
                 return 1
 
-        print("Flattening for C2F training...")
+        log.info("Flattening for C2F training...")
         c2f_path = flatten_for_c2f(prompts, outputs, output_dir)
-        print(f"  C2F training data saved to: {c2f_path}")
+        log.info(f"  C2F training data saved to: {c2f_path}")
 
-    print(f"\nDone! {len(outputs)} samples in {output_dir}")
+    log.info(f"\nDone! {len(outputs)} samples in {output_dir}")
     return 0
 
 

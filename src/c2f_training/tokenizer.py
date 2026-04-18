@@ -10,9 +10,10 @@ with zero truncation or intra-scale padding.
 The tokenizer is saved in HuggingFace format so it can be loaded later via
 ``AutoTokenizer.from_pretrained`` or ``PreTrainedTokenizerFast.from_pretrained``.
 """
+
 import re
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from datasets import load_dataset
 from tokenizers import Tokenizer
@@ -20,6 +21,10 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.trainers import WordLevelTrainer
 from transformers import PreTrainedTokenizerFast
+
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
 
 _LAYER_PATTERN = re.compile(r"^z_\d+:\s*(.*)$")
 
@@ -33,13 +38,9 @@ EOS_TOKEN = "[EOS]"
 # ── Text iterators (one line per scale segment) ────────────────────────────
 
 
-def _iter_texts_sft(
-    data_dir: Path, parquet_filename: str = "train.parquet"
-) -> Iterator[str]:
+def _iter_texts_sft(data_dir: Path, parquet_filename: str = "train.parquet") -> Iterator[str]:
     """Yield text lines from an SFT parquet (prompt + parsed response layers)."""
-    ds = load_dataset(
-        "parquet", data_files=str(data_dir / parquet_filename), split="train"
-    )
+    ds = load_dataset("parquet", data_files=str(data_dir / parquet_filename), split="train")
     for row in ds:
         # Prompt: the original 32-word document
         yield row["prompt"]
@@ -51,13 +52,9 @@ def _iter_texts_sft(
                 yield match.group(1).strip()
 
 
-def _iter_texts_c2f(
-    data_dir: Path, parquet_filename: str = "c2f_train.parquet"
-) -> Iterator[str]:
+def _iter_texts_c2f(data_dir: Path, parquet_filename: str = "c2f_train.parquet") -> Iterator[str]:
     """Yield text lines from a C2F parquet (single flat ``text`` column)."""
-    ds = load_dataset(
-        "parquet", data_files=str(data_dir / parquet_filename), split="train"
-    )
+    ds = load_dataset("parquet", data_files=str(data_dir / parquet_filename), split="train")
     for row in ds:
         yield row["text"]
 
@@ -88,9 +85,7 @@ def train_space_tokenizer(
     """
     data_dir = Path(data_dir)
     if parquet_filename is None:
-        parquet_filename = (
-            "train.parquet" if dataset_format == "sft" else "c2f_train.parquet"
-        )
+        parquet_filename = "train.parquet" if dataset_format == "sft" else "c2f_train.parquet"
 
     # Collect text lines from the dataset
     if dataset_format == "sft":
@@ -142,10 +137,10 @@ def load_or_train_space_tokenizer(
     tokenizer_dir = Path(tokenizer_dir)
 
     if (tokenizer_dir / "tokenizer.json").exists():
-        print(f"Loading existing space tokenizer from {tokenizer_dir}")
+        log.info(f"Loading existing space tokenizer from {tokenizer_dir}")
         return PreTrainedTokenizerFast.from_pretrained(str(tokenizer_dir))
 
-    print(f"Training new space tokenizer from {data_dir}...")
+    log.info(f"Training new space tokenizer from {data_dir}...")
     tokenizer = train_space_tokenizer(
         data_dir=data_dir,
         dataset_format=dataset_format,
@@ -155,7 +150,7 @@ def load_or_train_space_tokenizer(
 
     tokenizer_dir.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(str(tokenizer_dir))
-    print(f"  Vocab size: {tokenizer.vocab_size}")
-    print(f"  Saved to {tokenizer_dir}")
+    log.info(f"  Vocab size: {tokenizer.vocab_size}")
+    log.info(f"  Saved to {tokenizer_dir}")
 
     return tokenizer

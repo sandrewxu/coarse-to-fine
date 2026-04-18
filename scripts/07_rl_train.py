@@ -22,10 +22,15 @@ Usage:
     python scripts/07_rl_train.py --phase sft --config config/latent_generation.yaml \
         trainer.total_epochs=2
 """
+
 import argparse
 import os
 import sys
 from pathlib import Path
+
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -33,15 +38,23 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Step 7: ELBO optimisation")
-    parser.add_argument("--phase", required=True, choices=["sft", "c2f", "both", "joint"],
-                        help="Training phase to run")
+    parser.add_argument(
+        "--phase",
+        required=True,
+        choices=["sft", "c2f", "both", "joint"],
+        help="Training phase to run",
+    )
     parser.add_argument("--config", required=True, type=Path, help="Experiment YAML")
-    parser.add_argument("overrides", nargs="*", metavar="OVERRIDE",
-                        help="rl.* overrides (applied to config) or Hydra overrides (Phase A)")
+    parser.add_argument(
+        "overrides",
+        nargs="*",
+        metavar="OVERRIDE",
+        help="rl.* overrides (applied to config) or Hydra overrides (Phase A)",
+    )
     args = parser.parse_args()
 
     if not args.config.exists():
-        print(f"Error: Config not found: {args.config}", file=sys.stderr)
+        log.error(f"Config not found: {args.config}")
         return 1
 
     # Workaround: prevent uv from re-syncing inside torchrun subprocesses
@@ -50,8 +63,8 @@ def main() -> int:
     os.environ["UV_NO_SYNC"] = "1"
     os.environ["UV_PROJECT_ENVIRONMENT"] = _venv
 
+    from src.common.env import load_env, setup_wandb
     from src.config import load_config
-    from src.utils.env import load_env, setup_wandb
 
     load_env()
     config = load_config(args.config)
@@ -59,17 +72,19 @@ def main() -> int:
 
     # Apply dot-path overrides (rl.* → config, others → veRL pass-through)
     from src.rl.train import apply_overrides
+
     config, verl_overrides = apply_overrides(config, args.overrides)
 
     # Dispatch
     from src.rl.train import run_c2f_finetune, run_joint, run_sft_rl
 
     if args.phase in ("sft", "both"):
-        print("=" * 60)
-        print("Phase A: GRPO on q_φ (SFT model)")
-        print("=" * 60)
+        log.info("=" * 60)
+        log.info("Phase A: GRPO on q_φ (SFT model)")
+        log.info("=" * 60)
         rc = run_sft_rl(
-            config, PROJECT_ROOT,
+            config,
+            PROJECT_ROOT,
             config_path=args.config.resolve(),
             wandb_enabled=wandb_enabled,
             extra_overrides=verl_overrides,
@@ -78,19 +93,20 @@ def main() -> int:
             return rc
 
     if args.phase in ("c2f", "both"):
-        print("=" * 60)
-        print("Phase B: Supervised fine-tuning of p_θ (C2F model)")
-        print("=" * 60)
+        log.info("=" * 60)
+        log.info("Phase B: Supervised fine-tuning of p_θ (C2F model)")
+        log.info("=" * 60)
         rc = run_c2f_finetune(config, PROJECT_ROOT, wandb_enabled=wandb_enabled)
         if rc != 0:
             return rc
 
     if args.phase == "joint":
-        print("=" * 60)
-        print("Joint: Simultaneous SFT + C2F training")
-        print("=" * 60)
+        log.info("=" * 60)
+        log.info("Joint: Simultaneous SFT + C2F training")
+        log.info("=" * 60)
         rc = run_joint(
-            config, PROJECT_ROOT,
+            config,
+            PROJECT_ROOT,
             config_path=args.config.resolve(),
             wandb_enabled=wandb_enabled,
             extra_overrides=verl_overrides,
@@ -98,7 +114,7 @@ def main() -> int:
         if rc != 0:
             return rc
 
-    print("Done.")
+    log.info("Done.")
     return 0
 
 

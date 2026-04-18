@@ -5,6 +5,10 @@ Two backends: vLLM (fast, batched) and HuggingFace (simple, no extra dependency)
 Both apply the model's chat template before generating.
 """
 
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
+
 
 def _apply_chat_template(tokenizer, prompts: list[str]) -> list[str]:
     """Format each prompt as a chat message matching the SFT training format."""
@@ -17,15 +21,19 @@ def _apply_chat_template(tokenizer, prompts: list[str]) -> list[str]:
     return formatted
 
 
-def _vllm_worker(gpu_id: int, model_path: str, prompts: list[str],
-                  sampling_kwargs: dict, seed: int, result_queue) -> None:
+def _vllm_worker(
+    gpu_id: int, model_path: str, prompts: list[str], sampling_kwargs: dict, seed: int, result_queue
+) -> None:
     """Run vLLM on a single GPU. Puts (gpu_id, results) on the queue."""
     import os
+
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     from vllm import LLM, SamplingParams
 
-    llm = LLM(model=model_path, seed=seed, trust_remote_code=True, max_model_len=1024, max_num_seqs=1024)
+    llm = LLM(
+        model=model_path, seed=seed, trust_remote_code=True, max_model_len=1024, max_num_seqs=1024
+    )
     sampling_params = SamplingParams(**sampling_kwargs)
     tokenizer = llm.get_tokenizer()
     formatted = _apply_chat_template(tokenizer, prompts)
@@ -56,6 +64,7 @@ def generate_vllm(
 
     if num_gpus <= 1:
         import multiprocessing as mp
+
         mp.set_start_method("spawn", force=True)
         queue = mp.Queue()
         _vllm_worker(0, model_path, prompts, sampling_kwargs, seed, queue)
@@ -64,12 +73,13 @@ def generate_vllm(
 
     # Data parallelism: split prompts across GPUs using non-daemon Process
     import multiprocessing as mp
+
     mp.set_start_method("spawn", force=True)
 
     chunk_size = (len(prompts) + num_gpus - 1) // num_gpus
     prompt_chunks = [prompts[i : i + chunk_size] for i in range(0, len(prompts), chunk_size)]
 
-    print(f"  Data-parallel: splitting {len(prompts)} prompts across {len(prompt_chunks)} GPUs")
+    log.info(f"  Data-parallel: splitting {len(prompts)} prompts across {len(prompt_chunks)} GPUs")
     result_queue = mp.Queue()
     procs = []
     for gpu_id, chunk in enumerate(prompt_chunks):
@@ -107,14 +117,22 @@ def generate_hf(
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=True, padding_side="left"
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, dtype=torch.bfloat16, trust_remote_code=True,
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            model_path,
+            dtype=torch.bfloat16,
+            trust_remote_code=True,
+        )
+        .to(device)
+        .eval()
+    )
 
     formatted = _apply_chat_template(tokenizer, prompts)
     results = []
@@ -140,7 +158,7 @@ def generate_hf(
             results.append(text)
 
         if (i // batch_size + 1) % 10 == 0:
-            print(f"  Generated {min(i + batch_size, len(formatted))}/{len(formatted)}")
+            log.info(f"  Generated {min(i + batch_size, len(formatted))}/{len(formatted)}")
 
     return results
 

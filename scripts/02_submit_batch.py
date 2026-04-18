@@ -22,6 +22,7 @@ Usage:
     # Monitor all active batches
     python scripts/02_submit_batch.py --monitor-all
 """
+
 import argparse
 import json
 import sys
@@ -32,23 +33,36 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.batch.client import create_client
 from src.batch.submit import download_completed, monitor_all, monitor_batch, submit_batch
+from src.common.env import load_env
+from src.common.logging import get_logger
 from src.config import load_config
-from src.utils.env import load_env
+
+log = get_logger(__name__)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Submit, monitor, and download OpenAI batch jobs"
-    )
+    parser = argparse.ArgumentParser(description="Submit, monitor, and download OpenAI batch jobs")
     parser.add_argument("--input", type=Path, default=None, help="Request JSONL file to submit")
     parser.add_argument("--config", type=Path, default=None, help="Experiment config YAML")
     parser.add_argument("--model", type=str, default=None, help="Model name for metadata")
-    parser.add_argument("--run-tag", type=str, default=None, help="Run tag for batch metadata/filtering")
-    parser.add_argument("--output-dir", type=Path, default=None, help="Directory for downloaded outputs")
-    parser.add_argument("--extra-metadata", type=str, default=None, help="Additional metadata as JSON string")
-    parser.add_argument("--monitor", action="store_true", help="Poll until submitted batch completes")
-    parser.add_argument("--monitor-all", action="store_true", help="Monitor all active batches (no submission)")
-    parser.add_argument("--download", action="store_true", help="Download completed batches (no submission)")
+    parser.add_argument(
+        "--run-tag", type=str, default=None, help="Run tag for batch metadata/filtering"
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=None, help="Directory for downloaded outputs"
+    )
+    parser.add_argument(
+        "--extra-metadata", type=str, default=None, help="Additional metadata as JSON string"
+    )
+    parser.add_argument(
+        "--monitor", action="store_true", help="Poll until submitted batch completes"
+    )
+    parser.add_argument(
+        "--monitor-all", action="store_true", help="Monitor all active batches (no submission)"
+    )
+    parser.add_argument(
+        "--download", action="store_true", help="Download completed batches (no submission)"
+    )
     parser.add_argument("--poll-interval", type=int, default=30, help="Polling interval in seconds")
     args = parser.parse_args()
 
@@ -80,11 +94,11 @@ def main():
 
     # Submit mode
     if not args.input:
-        print("Error: --input is required for submission (or use --download / --monitor-all)", file=sys.stderr)
+        log.error("--input is required for submission (or use --download / --monitor-all)")
         sys.exit(1)
 
     if not args.input.exists():
-        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+        log.error("Input file not found: %s", args.input)
         sys.exit(1)
 
     # Build metadata
@@ -100,18 +114,18 @@ def main():
         try:
             metadata.update(json.loads(args.extra_metadata))
         except json.JSONDecodeError:
-            print("Error: --extra-metadata must be valid JSON", file=sys.stderr)
+            log.error("--extra-metadata must be valid JSON")
             sys.exit(1)
 
     batch_id = submit_batch(client, args.input, metadata=metadata)
 
     if args.monitor:
-        print(f"\nMonitoring batch {batch_id}...")
+        log.error(f"\nMonitoring batch {batch_id}...")
         result = monitor_batch(client, batch_id, output_dir, poll_interval=args.poll_interval)
         if result:
-            print(f"\nOutput saved to: {result}")
+            log.info(f"\nOutput saved to: {result}")
         else:
-            print("\nBatch did not complete successfully.", file=sys.stderr)
+            log.info("\nBatch did not complete successfully.")
             return 1
 
     return 0

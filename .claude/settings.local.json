@@ -26,7 +26,12 @@
       "Bash(find /Users/andrewxu/Developer/coarse-to-fine/.venv -name \"*.py\" -type f -exec grep -l \"_install_gloo_patch\" {} \\\\;)",
       "Bash(gh api *)",
       "WebFetch(domain:pypi.org)",
-      "Bash(gh search *)"
+      "Bash(gh search *)",
+      "Bash(git -C /Users/andrewxu/Developer/coarse-to-fine status --short)",
+      "Bash(git -C /Users/andrewxu/Developer/coarse-to-fine ls-files)",
+      "Bash(awk '/^[[:space:]]*def /{fname=$2; line=NR} /^[[:space:]]*def /&&NR>1{if\\(NR-line>50\\)print FILENAME\":\"fname\" \\(\"\\(NR-line\\)\" lines\\)\"}' /Users/andrewxu/Developer/coarse-to-fine/src/**/*.py)",
+      "Bash(sort -t: -k3 -rn)",
+      "Bash(git check-ignore *)"
     ]
   }
 }

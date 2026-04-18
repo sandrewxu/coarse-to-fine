@@ -10,6 +10,7 @@ Usage:
     python scripts/00_prepare_data.py --dataset tinystoriesv2 --config config/latent_generation.yaml
     python scripts/00_prepare_data.py --dataset fineweb_edu_10bt --memory 32 --data-dir /scratch/data
 """
+
 import argparse
 import os
 import subprocess
@@ -20,17 +21,20 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.common.logging import get_logger
 from src.data.preprocessing import preprocess_tinystories
 from src.data.registry import DATASET_REGISTRY
 
+log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Download & tool setup  (kept in-script — infrastructure, not reusable lib)
 # ---------------------------------------------------------------------------
 
+
 def run_command(command: str) -> None:
     """Run a shell command, printing it first."""
-    print(f"Running: {command}")
+    log.info(f"Running: {command}")
     subprocess.run(command, shell=True, check=True)
 
 
@@ -38,7 +42,7 @@ def download_dataset(repo_id: str, local_dir: str, allow_patterns: str | None) -
     """Download a dataset from HuggingFace Hub with retries."""
     from huggingface_hub import snapshot_download
 
-    print(f"Downloading dataset from {repo_id}...")
+    log.info(f"Downloading dataset from {repo_id}...")
     max_retries = 5
     retry_delay = 10
 
@@ -53,13 +57,17 @@ def download_dataset(repo_id: str, local_dir: str, allow_patterns: str | None) -
                 max_workers=16,
             )
             break
-        except Exception:
+        except (OSError, ConnectionError, TimeoutError) as e:
+            # Network / disk transient failures during HF download — retry.
+            # Anything else (auth, validation) should propagate.
             if attempt < max_retries - 1:
-                print(f"Timeout occurred. Retrying in {retry_delay} seconds...")
+                log.warning(
+                    "download attempt %d failed (%s); retrying in %ds", attempt + 1, e, retry_delay
+                )
                 time.sleep(retry_delay)
             else:
                 raise
-    print(f"Dataset downloaded to {local_dir}")
+    log.info(f"Dataset downloaded to {local_dir}")
 
 
 def setup_terashuf(work_dir: str) -> str:
@@ -68,16 +76,18 @@ def setup_terashuf(work_dir: str) -> str:
     terashuf_executable = os.path.join(terashuf_dir, "terashuf")
 
     if os.path.exists(terashuf_executable):
-        print("terashuf executable already exists. Skipping setup.")
+        log.info("terashuf executable already exists. Skipping setup.")
         return terashuf_dir
 
-    print("Setting up terashuf...")
+    log.info("Setting up terashuf...")
     run_command(f"git clone https://github.com/alexandres/terashuf {terashuf_dir}")
     run_command(f"make -C {terashuf_dir}")
     return terashuf_dir
 
 
-def parquet_to_jsonl(dataset: str, work_dir: str, src_dir: str, tgt_dir: str, ntasks: int = 64) -> None:
+def parquet_to_jsonl(
+    dataset: str, work_dir: str, src_dir: str, tgt_dir: str, ntasks: int = 64
+) -> None:
     """Convert parquet files to JSONL using datatrove."""
     from datatrove.executor import LocalPipelineExecutor
     from datatrove.pipeline.readers import ParquetReader
@@ -85,8 +95,12 @@ def parquet_to_jsonl(dataset: str, work_dir: str, src_dir: str, tgt_dir: str, nt
 
     pipeline_exec = LocalPipelineExecutor(
         pipeline=[
-            ParquetReader(src_dir, file_progress=True, doc_progress=True, glob_pattern="**/*.parquet"),
-            JsonlWriter(tgt_dir, output_filename=dataset + ".chunk.${rank}.jsonl", compression=None),
+            ParquetReader(
+                src_dir, file_progress=True, doc_progress=True, glob_pattern="**/*.parquet"
+            ),
+            JsonlWriter(
+                tgt_dir, output_filename=dataset + ".chunk.${rank}.jsonl", compression=None
+            ),
         ],
         tasks=ntasks,
         logging_dir=os.path.join(work_dir, "datatrove"),
@@ -98,22 +112,32 @@ def parquet_to_jsonl(dataset: str, work_dir: str, src_dir: str, tgt_dir: str, nt
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Download, preprocess, shuffle, and split a dataset")
-    parser.add_argument("--dataset", type=str, default=None, help="Dataset name (e.g. tinystoriesv2)")
+    parser = argparse.ArgumentParser(
+        description="Download, preprocess, shuffle, and split a dataset"
+    )
+    parser.add_argument(
+        "--dataset", type=str, default=None, help="Dataset name (e.g. tinystoriesv2)"
+    )
     parser.add_argument("--config", type=Path, default=None, help="Experiment config YAML")
     parser.add_argument("--memory", type=float, default=None, help="Terashuf memory in GB")
     parser.add_argument("--data-dir", type=str, default=None, help="Raw data directory")
-    parser.add_argument("--final-data-dir", type=str, default=None, help="Final destination for shuffled data")
+    parser.add_argument(
+        "--final-data-dir", type=str, default=None, help="Final destination for shuffled data"
+    )
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--nchunks", type=int, default=None, help="Number of shards")
-    parser.add_argument("--clear-work-dir", action="store_true", help="Clear work dir after transfer")
+    parser.add_argument(
+        "--clear-work-dir", action="store_true", help="Clear work dir after transfer"
+    )
     args = parser.parse_args()
 
     # Load config defaults
     prep_config: dict = {}
     if args.config:
         from src.config import load_config
+
         config = load_config(args.config)
         prep_config = config.get("data_prep", {})
 
@@ -134,7 +158,7 @@ def main() -> int:
 
     # Validate dataset
     if dataset not in DATASET_REGISTRY:
-        print(f"Error: Unknown dataset '{dataset}'. Available: {list(DATASET_REGISTRY.keys())}", file=sys.stderr)
+        log.error("Unknown dataset %r. Available: %s", dataset, list(DATASET_REGISTRY.keys()))
         return 1
 
     info = DATASET_REGISTRY[dataset]
@@ -194,21 +218,21 @@ def main() -> int:
         run_command(f"head -n {k_rl} {chunk_file} >> {rl_file}")
         run_command(f"sed -i '1,{k_rl}d' {chunk_file}")
 
-    print(f"Processing completed in {work_dir}")
+    log.info(f"Processing completed in {work_dir}")
 
     # Optional: transfer to final location
     if final_data_dir:
         final_out_dir = os.path.join(final_data_dir, f"{dataset}_shuffled")
-        print(f"Copying shuffled data to: {final_out_dir}")
+        log.info(f"Copying shuffled data to: {final_out_dir}")
         os.makedirs(final_data_dir, exist_ok=True)
         run_command(f"rsync -avP --delete {out_dir}/ {final_out_dir}")
 
         if clear_work_dir:
-            print("Clearing work directories...")
+            log.info("Clearing work directories...")
             run_command(f"rm -rf {src_dir}")
             run_command(f"rm -rf {out_dir}")
 
-    print("All tasks completed successfully!")
+    log.info("All tasks completed successfully!")
     return 0
 
 

@@ -5,21 +5,23 @@ Handles model initialization (from SFT checkpoint, base model, or random),
 weight transfer for compatible parameters, TrainingArguments construction
 from the experiment YAML config, and per-scale loss logging via W&B.
 """
+
 from pathlib import Path
 from typing import Any
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+from transformers import AutoModelForCausalLM, Trainer, TrainingArguments
 
+from src.common.logging import get_logger
 from src.qwen3_joint.configuration import C2FConfig
 from src.qwen3_joint.modeling import C2FForCausalLM
+
+log = get_logger(__name__)
 
 SCALE_NAMES = ["z_4", "z_3", "z_2", "z_1", "text"]
 
 
-def load_c2f_model(
-    config: dict[str, Any], *, vocab_size: int | None = None
-) -> C2FForCausalLM:
+def load_c2f_model(config: dict[str, Any], *, vocab_size: int | None = None) -> C2FForCausalLM:
     """
     Load and initialize C2FForCausalLM.
 
@@ -47,8 +49,12 @@ def load_c2f_model(
         if vocab_size is not None:
             extra_kwargs["vocab_size"] = vocab_size
         for key in (
-            "hidden_size", "intermediate_size", "num_hidden_layers", "num_attention_heads",
-            "num_key_value_heads", "head_dim",
+            "hidden_size",
+            "intermediate_size",
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
         ):
             if c2f_config.get(key) is not None:
                 extra_kwargs[key] = c2f_config[key]
@@ -72,9 +78,7 @@ def load_c2f_model(
     return model
 
 
-def _load_compatible_weights(
-    model: C2FForCausalLM, checkpoint_path: str
-) -> C2FForCausalLM:
+def _load_compatible_weights(model: C2FForCausalLM, checkpoint_path: str) -> C2FForCausalLM:
     """
     Load weights from a Qwen3/SFT checkpoint into the C2F model.
 
@@ -89,9 +93,7 @@ def _load_compatible_weights(
     Returns:
         Model with compatible weights loaded.
     """
-    source = AutoModelForCausalLM.from_pretrained(
-        checkpoint_path, trust_remote_code=True
-    )
+    source = AutoModelForCausalLM.from_pretrained(checkpoint_path, trust_remote_code=True)
     source_state = source.state_dict()
     target_state = model.state_dict()
 
@@ -104,9 +106,11 @@ def _load_compatible_weights(
             skipped.append(name)
 
     model.load_state_dict(target_state)
-    print(f"Weight transfer: loaded {len(loaded)}, skipped {len(skipped)}")
+    log.info(f"Weight transfer: loaded {len(loaded)}, skipped {len(skipped)}")
     if skipped:
-        print(f"  Skipped params (new or shape mismatch): {skipped[:10]}{'...' if len(skipped) > 10 else ''}")
+        log.info(
+            f"  Skipped params (new or shape mismatch): {skipped[:10]}{'...' if len(skipped) > 10 else ''}"
+        )
     return model
 
 
@@ -189,8 +193,9 @@ class C2FTrainer(Trainer):
         *args, **kwargs: Forwarded to :class:`transformers.Trainer`.
     """
 
-    def __init__(self, *args, scale_lengths: list[int] | None = None,
-                 mask_type: str = "block", **kwargs):
+    def __init__(
+        self, *args, scale_lengths: list[int] | None = None, mask_type: str = "block", **kwargs
+    ):
         super().__init__(*args, **kwargs)
         scale_lengths = scale_lengths or [2, 4, 8, 16, 32]
         self._mask_type = mask_type
@@ -210,33 +215,27 @@ class C2FTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
     @torch.no_grad()
-    def _accumulate_scale_losses(
-        self, logits: torch.Tensor, labels: torch.Tensor
-    ) -> None:
+    def _accumulate_scale_losses(self, logits: torch.Tensor, labels: torch.Tensor) -> None:
         loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
 
         if self._mask_type == "causal":
             # Shifted: logits[:, :-1] predicts labels[:, 1:]
             logits = logits[:, :-1, :]
             labels = labels[:, 1:]
-            for name, (start, end) in zip(self._scale_names, self._scale_ranges):
+            for name, (start, end) in zip(self._scale_names, self._scale_ranges, strict=False):
                 # Original positions [start, end) → shifted indices [start-1, end-1)
-                s_logits = logits[:, start - 1:end - 1, :].reshape(-1, logits.size(-1))
-                s_labels = labels[:, start - 1:end - 1].reshape(-1)
+                s_logits = logits[:, start - 1 : end - 1, :].reshape(-1, logits.size(-1))
+                s_labels = labels[:, start - 1 : end - 1].reshape(-1)
                 if (s_labels != -100).any():
                     val = loss_fct(s_logits, s_labels).item()
-                    self._scale_loss_accum[name] = (
-                        self._scale_loss_accum.get(name, 0.0) + val
-                    )
+                    self._scale_loss_accum[name] = self._scale_loss_accum.get(name, 0.0) + val
         else:
-            for name, (start, end) in zip(self._scale_names, self._scale_ranges):
+            for name, (start, end) in zip(self._scale_names, self._scale_ranges, strict=False):
                 s_logits = logits[:, start:end, :].reshape(-1, logits.size(-1))
                 s_labels = labels[:, start:end].reshape(-1)
                 if (s_labels != -100).any():
                     val = loss_fct(s_logits, s_labels).item()
-                    self._scale_loss_accum[name] = (
-                        self._scale_loss_accum.get(name, 0.0) + val
-                    )
+                    self._scale_loss_accum[name] = self._scale_loss_accum.get(name, 0.0) + val
         self._scale_loss_steps += 1
 
     def log(self, logs: dict, *args, **kwargs) -> None:
@@ -244,9 +243,7 @@ class C2FTrainer(Trainer):
         if self._scale_loss_steps > 0 and "loss" in logs:
             for name in self._scale_names:
                 if name in self._scale_loss_accum:
-                    logs[f"loss_{name}"] = (
-                        self._scale_loss_accum[name] / self._scale_loss_steps
-                    )
+                    logs[f"loss_{name}"] = self._scale_loss_accum[name] / self._scale_loss_steps
             self._scale_loss_accum.clear()
             self._scale_loss_steps = 0
         super().log(logs, *args, **kwargs)

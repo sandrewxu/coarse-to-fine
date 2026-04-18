@@ -5,8 +5,8 @@ Outputs parquet with exactly two columns: prompt (original text) and response
 (raw z_n: format latent layers). The response preserves the z_4: ...\nz_3: ...
 format so the SFT model learns to generate verifiable output.
 """
+
 from pathlib import Path
-from typing import Optional
 
 from datasets import Dataset
 
@@ -16,7 +16,7 @@ from src.verification import VerificationResult
 
 def create_training_dataset(
     verified_results: list[VerificationResult],
-    prompts_by_id: Optional[dict[str, str]] = None,
+    prompts_by_id: dict[str, str] | None = None,
 ) -> Dataset:
     """
     Create dataset from verified results with prompt and response columns.
@@ -72,7 +72,7 @@ def save_training_dataset(
 def create_and_save_dataset(
     verified_results: list[VerificationResult],
     output_dir: str | Path,
-    prompts_by_id: Optional[dict[str, str]] = None,
+    prompts_by_id: dict[str, str] | None = None,
     train_filename: str = "train.parquet",
 ) -> tuple[Dataset, Path]:
     """

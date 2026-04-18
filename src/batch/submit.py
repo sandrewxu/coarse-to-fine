@@ -7,6 +7,10 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
+
 
 def upload_file(client: OpenAI, file_path: Path) -> str:
     """Upload a JSONL file to OpenAI for batch processing. Returns file ID."""
@@ -24,11 +28,11 @@ def submit_batch(
 
     Returns the batch ID.
     """
-    print(f"Uploading {file_path}...")
+    log.info(f"Uploading {file_path}...")
     file_id = upload_file(client, file_path)
-    print(f"  File ID: {file_id}")
+    log.info(f"  File ID: {file_id}")
 
-    print("Submitting batch request...")
+    log.info("Submitting batch request...")
     batch = client.batches.create(
         input_file_id=file_id,
         endpoint="/v1/chat/completions",
@@ -36,11 +40,11 @@ def submit_batch(
         metadata=metadata or {},
     )
 
-    print(f"\nBatch submitted successfully!")
-    print(f"  Batch ID: {batch.id}")
-    print(f"  Status: {batch.status}")
+    log.info("\nBatch submitted successfully!")
+    log.info(f"  Batch ID: {batch.id}")
+    log.info(f"  Status: {batch.status}")
     if metadata:
-        print(f"  Metadata: {json.dumps(metadata, indent=2)}")
+        log.info(f"  Metadata: {json.dumps(metadata, indent=2)}")
 
     return batch.id
 
@@ -52,24 +56,28 @@ def submit_batch(
 
 def _print_batch_info(batch) -> None:
     """Print detailed information about a batch job."""
-    print(f"\n{'=' * 50}")
-    print(f"Batch ID: {batch.id}")
-    print(f"Status: {batch.status}")
+    log.info(f"\n{'=' * 50}")
+    log.info(f"Batch ID: {batch.id}")
+    log.info(f"Status: {batch.status}")
 
     if batch.created_at:
-        print(f"Created: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(batch.created_at))}")
+        log.info(f"Created: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(batch.created_at))}")
     if batch.in_progress_at:
-        print(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(batch.in_progress_at))}")
+        log.info(
+            f"Started: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(batch.in_progress_at))}"
+        )
     if batch.completed_at:
-        print(f"Completed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(batch.completed_at))}")
+        log.info(
+            f"Completed: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(batch.completed_at))}"
+        )
 
     if hasattr(batch, "request_counts") and batch.request_counts:
         rc = batch.request_counts
-        print(f"Requests: {rc.completed}/{rc.total} ({rc.failed} failed)")
+        log.info(f"Requests: {rc.completed}/{rc.total} ({rc.failed} failed)")
 
     if batch.metadata:
-        print(f"Metadata: {batch.metadata}")
-    print(f"{'=' * 50}")
+        log.info(f"Metadata: {batch.metadata}")
+    log.info(f"{'=' * 50}")
 
 
 def _download_file(client: OpenAI, file_id: str, output_path: Path) -> Path:
@@ -78,7 +86,7 @@ def _download_file(client: OpenAI, file_id: str, output_path: Path) -> Path:
     response = client.files.content(file_id)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(response.text)
-    print(f"  Saved: {output_path}")
+    log.info(f"  Saved: {output_path}")
     return output_path
 
 
@@ -123,10 +131,10 @@ def monitor_batch(
 
                 return out_path
 
-            print(f"Batch ended with status: {batch.status}")
+            log.info(f"Batch ended with status: {batch.status}")
             return None
 
-        print(f"Polling again in {poll_interval}s...")
+        log.info(f"Polling again in {poll_interval}s...")
         time.sleep(poll_interval)
 
 
@@ -137,16 +145,13 @@ def monitor_all(
 ) -> list[Path]:
     """Monitor all active batches and download results as they complete."""
     all_batches = list(client.batches.list(limit=100))
-    active = {
-        b.id: b for b in all_batches
-        if b.status not in _TERMINAL_STATUSES
-    }
+    active = {b.id: b for b in all_batches if b.status not in _TERMINAL_STATUSES}
 
     if not active:
-        print("No active batches found.")
+        log.info("No active batches found.")
         return []
 
-    print(f"Monitoring {len(active)} active batches...")
+    log.info(f"Monitoring {len(active)} active batches...")
     downloaded: list[Path] = []
 
     while active:
@@ -167,7 +172,7 @@ def monitor_all(
                 active.pop(batch_id)
 
         if active:
-            print(f"\n{len(active)} batches still active. Polling in {poll_interval}s...")
+            log.info(f"\n{len(active)} batches still active. Polling in {poll_interval}s...")
             time.sleep(poll_interval)
 
     return downloaded
@@ -189,7 +194,7 @@ def download_completed(
         if run_tag and (not batch.metadata or batch.metadata.get("run_tag") != run_tag):
             continue
 
-        print(f"\nBatch {batch.id} (completed)")
+        log.info(f"\nBatch {batch.id} (completed)")
 
         if batch.output_file_id:
             out_path = _get_output_path(batch, output_dir, "output")
@@ -197,7 +202,7 @@ def download_completed(
                 _download_file(client, batch.output_file_id, out_path)
                 downloaded.append(out_path)
             else:
-                print(f"  Already exists: {out_path}")
+                log.info(f"  Already exists: {out_path}")
 
         if batch.error_file_id:
             err_path = _get_output_path(batch, output_dir, "errors")
@@ -205,5 +210,5 @@ def download_completed(
                 _download_file(client, batch.error_file_id, err_path)
 
     if not downloaded:
-        print("No new completed batches to download.")
+        log.info("No new completed batches to download.")
     return downloaded

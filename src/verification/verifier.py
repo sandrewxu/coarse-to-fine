@@ -4,14 +4,15 @@ Space-based verification for latent layer outputs.
 Verifies that generated text has the expected z_N: layer format with
 correct word counts (splitting on whitespace).
 """
+
 import re
 from dataclasses import dataclass, field
-from typing import Any
 
 
 @dataclass
 class Layer:
     """A parsed latent layer."""
+
     name: str
     content: str
     word_count: int
@@ -20,6 +21,7 @@ class Layer:
 @dataclass
 class VerificationResult:
     """Result of verifying a single output."""
+
     custom_id: str
     passed: bool = True
     raw_content: str = ""
@@ -81,11 +83,9 @@ def verify(
         return result
 
     # Check layer count and order
-    layer_names = [l.name for l in layers]
+    layer_names = [layer.name for layer in layers]
     if layer_names != _EXPECTED_LAYERS:
-        result.fail(
-            f"Expected layers {_EXPECTED_LAYERS}, got {layer_names}"
-        )
+        result.fail(f"Expected layers {_EXPECTED_LAYERS}, got {layer_names}")
         return result
 
     # Check word counts
@@ -95,9 +95,7 @@ def verify(
             result.fail(f"No word count constraint for {layer.name}")
             return result
         if strict_word_count and layer.word_count != expected:
-            result.fail(
-                f"{layer.name}: expected {expected} words, got {layer.word_count}"
-            )
+            result.fail(f"{layer.name}: expected {expected} words, got {layer.word_count}")
             return result
 
     # Check for empty layers

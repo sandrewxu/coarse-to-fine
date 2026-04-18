@@ -1,4 +1,5 @@
 """Tests for dataset utilities."""
+
 import sys
 import tempfile
 from pathlib import Path
@@ -37,8 +38,8 @@ def test_detect_c2f_format():
 
 def test_sft_dataset_creation():
     """Test creating SFT dataset from verified results."""
-    from src.verification import VerificationResult
     from src.sft.dataset import create_training_dataset
+    from src.verification import VerificationResult
 
     results = [
         VerificationResult(custom_id="test-1", passed=True, raw_content="z_4: a b\nz_3: c d e f"),

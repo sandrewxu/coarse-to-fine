@@ -83,17 +83,19 @@ def create_batch_requests(
         messages.extend(few_shot_messages)
         messages.append({"role": "user", "content": user_prompt_template.format(doc=doc)})
 
-        requests.append({
-            "custom_id": f"request-{i}",
-            "method": "POST",
-            "url": "/v1/chat/completions",
-            "body": {
-                "model": model,
-                "messages": messages,
-                "reasoning_effort": reasoning_effort,
-                "verbosity": verbosity,
-            },
-        })
+        requests.append(
+            {
+                "custom_id": f"request-{i}",
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": {
+                    "model": model,
+                    "messages": messages,
+                    "reasoning_effort": reasoning_effort,
+                    "verbosity": verbosity,
+                },
+            }
+        )
     return requests
 
 

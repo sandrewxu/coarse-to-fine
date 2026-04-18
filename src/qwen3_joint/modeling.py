@@ -1,3 +1,20 @@
+"""C2FForCausalLM — Qwen3 forked for coarse-to-fine generation.
+
+Three differences from upstream `transformers.models.qwen3.modeling_qwen3`:
+
+1. **Per-scale absolute embeddings** (`C2FScaleEmbedding`) replace RoPE — token
+   position is determined by which scale block it belongs to, not its index.
+2. **Block-prefix attention mask** (`create_c2f_block_causal_mask`) replaces the
+   causal mask — tokens at scale k attend to all coarser scales but are
+   independent within the same scale.
+3. **Unshifted cross-entropy** loss — labels align 1:1 with input positions
+   rather than predicting the next token.
+
+Every line that diverges from upstream Qwen3 is annotated with `# C2F:`.
+To upgrade the base model, diff against `transformers.models.qwen3.modeling_qwen3`
+and re-apply each `# C2F:` block. See `README.md` in this folder for details.
+"""
+
 # C2F: -----------------------------------------------------------------------
 # All code below is specific to the Coarse-to-Fine model.  Every departure
 # from the Qwen3 base is annotated with a "# C2F:" comment.
@@ -6,8 +23,6 @@ from collections.abc import Callable
 
 import torch
 from torch import nn
-
-from src.qwen3_joint.configuration import C2FConfig
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -22,23 +37,34 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 from transformers.processing_utils import Unpack
 
+from src.qwen3_joint.configuration import C2FConfig
+
 # Compat: these decorators/types were added in transformers 4.52; provide
 # no-op fallbacks so the model works with 4.51 (shipped by verl / vllm).
 try:
     from transformers.utils import TransformersKwargs, auto_docstring
 except ImportError:
     TransformersKwargs = FlashAttentionKwargs
-    auto_docstring = lambda fn: fn
+
+    def auto_docstring(fn):
+        return fn
+
 
 try:
     from transformers.utils.generic import merge_with_config_defaults
 except ImportError:
-    merge_with_config_defaults = lambda fn: fn
+
+    def merge_with_config_defaults(fn):
+        return fn
+
 
 try:
     from transformers.utils.output_capturing import capture_outputs
 except ImportError:
-    capture_outputs = lambda fn: fn
+
+    def capture_outputs(fn):
+        return fn
+
 
 def create_c2f_block_causal_mask(
     config,
@@ -91,7 +117,9 @@ def create_c2f_block_causal_mask(
     attend[pad_idx, pad_idx] = True
 
     # C2F: convert boolean attend → additive float mask (0 / -inf).
-    mask = torch.full((seq_len, seq_len), fill_value=torch.finfo(dtype).min, device=device, dtype=dtype)
+    mask = torch.full(
+        (seq_len, seq_len), fill_value=torch.finfo(dtype).min, device=device, dtype=dtype
+    )
     mask[attend] = 0.0
 
     return mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
@@ -125,7 +153,9 @@ def create_causal_mask(
     pad_idx = is_pad.nonzero(as_tuple=True)[0]
     attend[pad_idx, pad_idx] = True  # self-attend to avoid NaN
 
-    mask = torch.full((seq_len, seq_len), fill_value=torch.finfo(dtype).min, device=device, dtype=dtype)
+    mask = torch.full(
+        (seq_len, seq_len), fill_value=torch.finfo(dtype).min, device=device, dtype=dtype
+    )
     mask[attend] = 0.0
 
     return mask.unsqueeze(0).unsqueeze(0).expand(batch_size, 1, seq_len, seq_len)
@@ -163,7 +193,7 @@ class C2FScaleEmbedding(nn.Module):
 
         # C2F: concatenate BOS embedding, per-scale embeddings, and zero padding.
         parts: list[torch.Tensor] = [self.bos_emb.unsqueeze(0)]  # [1, H]
-        for emb, length in zip(self.embeddings, self.scale_lengths):
+        for emb, length in zip(self.embeddings, self.scale_lengths, strict=False):
             indices = torch.arange(length, device=device)
             parts.append(emb(indices))  # [length, H]
 
@@ -173,7 +203,7 @@ class C2FScaleEmbedding(nn.Module):
             parts.append(torch.zeros(pad_len, hidden_size, device=device, dtype=dtype))
 
         pos_emb = torch.cat(parts, dim=0)  # [full_seq_len, H]
-        pos_emb = pos_emb[:seq_len]        # C2F: clip to the actual input length
+        pos_emb = pos_emb[:seq_len]  # C2F: clip to the actual input length
         return pos_emb.unsqueeze(0).expand(batch_size, -1, -1)  # [B, seq_len, H]
 
 
@@ -188,7 +218,9 @@ class C2FAttention(Qwen3Attention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],  # C2F: kept for API compat, value is (None, None)
+        position_embeddings: tuple[
+            torch.Tensor, torch.Tensor
+        ],  # C2F: kept for API compat, value is (None, None)
         attention_mask: torch.Tensor | None,
         past_key_values: Cache | None = None,
         cache_position: torch.LongTensor | None = None,
@@ -207,7 +239,9 @@ class C2FAttention(Qwen3Attention):
         if past_key_values is not None:
             # C2F: removed sin/cos from cache_kwargs (not used without RoPE)
             cache_kwargs = {"cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_values.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get(
             self.config._attn_implementation, eager_attention_forward
@@ -317,9 +351,7 @@ class C2FModel(Qwen3Model):
         # directly, which bypasses this masking.
         if self.config.mask_type == "block" and not caller_provided_embeds:
             content_end = min(self._content_len, inputs_embeds.shape[1])
-            mask_vec = self.mask_embedding.broadcast_to(
-                inputs_embeds[:, 1:content_end].shape
-            )
+            mask_vec = self.mask_embedding.broadcast_to(inputs_embeds[:, 1:content_end].shape)
             inputs_embeds = inputs_embeds.clone()
             inputs_embeds[:, 1:content_end] = mask_vec
 
@@ -334,9 +366,13 @@ class C2FModel(Qwen3Model):
             past_key_values = DynamicCache(config=self.config)
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
             cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
             )
 
         if position_ids is None:

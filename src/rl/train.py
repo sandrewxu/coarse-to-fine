@@ -10,11 +10,15 @@ Phase B — ``run_c2f_finetune()``:
 Phase Joint — ``run_joint()``:
     Simultaneous SFT + C2F training (placeholder for custom veRL modification).
 """
-import sys
+
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
 
 # ── Override utilities ───────────────────────────────────────────────────────
 
@@ -38,9 +42,7 @@ def _cast_value(raw: str):
     return raw
 
 
-def apply_overrides(
-    config: dict, overrides: list[str]
-) -> tuple[dict, list[str]]:
+def apply_overrides(config: dict, overrides: list[str]) -> tuple[dict, list[str]]:
     """
     Split overrides into config-dict updates (``rl.*``) and veRL pass-throughs.
 
@@ -72,7 +74,9 @@ def apply_overrides(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _prep_rl_parquet(config: dict[str, Any], project_root: Path, rl_section: str = "sft_rl") -> Path:
+def _prep_rl_parquet(
+    config: dict[str, Any], project_root: Path, rl_section: str = "sft_rl"
+) -> Path:
     """
     Build the RL training parquet from the RL split JSONL.
 
@@ -98,7 +102,7 @@ def _prep_rl_parquet(config: dict[str, Any], project_root: Path, rl_section: str
     rl_parquet = rl_dataset_dir / "sft_rl.parquet"
 
     if rl_parquet.exists():
-        print(f"  RL parquet already exists: {rl_parquet}")
+        log.error(f"  RL parquet already exists: {rl_parquet}")
         return rl_parquet
 
     # Load raw documents from the RL split
@@ -110,13 +114,12 @@ def _prep_rl_parquet(config: dict[str, Any], project_root: Path, rl_section: str
 
     if not rl_split_file.exists():
         raise FileNotFoundError(
-            f"RL split not found: {rl_split_file}\n"
-            "Run step 0 (00_prepare_data.py) first."
+            f"RL split not found: {rl_split_file}\nRun step 0 (00_prepare_data.py) first."
         )
 
     from src.generation.dataset import load_documents_from_jsonl
 
-    print(f"  Preparing RL parquet from {rl_split_file}...")
+    log.info(f"  Preparing RL parquet from {rl_split_file}...")
     docs = load_documents_from_jsonl([rl_split_file])
 
     records = [
@@ -129,7 +132,7 @@ def _prep_rl_parquet(config: dict[str, Any], project_root: Path, rl_section: str
     ]
     ds = Dataset.from_list(records)
     ds.to_parquet(str(rl_parquet))
-    print(f"  Saved RL parquet: {rl_parquet} ({len(ds):,} samples)")
+    log.info(f"  Saved RL parquet: {rl_parquet} ({len(ds):,} samples)")
     return rl_parquet
 
 
@@ -171,52 +174,49 @@ def run_sft_rl(
 
     rl_sft_cfg = config.get("rl", {}).get("sft_rl", {})
     if not rl_sft_cfg:
-        print("Error: config['rl']['sft_rl'] section is missing.", file=sys.stderr)
+        log.error("config['rl']['sft_rl'] section is missing.")
         return 1
 
-    num_gpus = int(rl_sft_cfg.get("num_gpus", 1))
+    int(rl_sft_cfg.get("num_gpus", 1))
 
     # ── Validate checkpoint paths ────────────────────────────────────────────
     c2f_model_path = Path(rl_sft_cfg.get("c2f_model_path", "checkpoints/decoder"))
     if not c2f_model_path.is_absolute():
         c2f_model_path = project_root / c2f_model_path
     if not c2f_model_path.exists():
-        print(f"Error: C2F model not found: {c2f_model_path}", file=sys.stderr)
-        print(
-            "Run step 6 (06_train_decoder.py) first to pretrain the C2F model.",
-            file=sys.stderr,
-        )
+        log.error(f"C2F model not found: {c2f_model_path}")
+        log.error("Run step 6 (06_train_decoder.py) first to pretrain the C2F model.")
         return 1
 
     sft_model_path = Path(rl_sft_cfg.get("model_path", "checkpoints/sft"))
     if not sft_model_path.is_absolute():
         sft_model_path = project_root / sft_model_path
     if not sft_model_path.exists():
-        print(f"Error: SFT model not found: {sft_model_path}", file=sys.stderr)
-        print("Run step 4 (04_sft_train.py) first.", file=sys.stderr)
+        log.error(f"SFT model not found: {sft_model_path}")
+        log.error("Run step 4 (04_sft_train.py) first.")
         return 1
 
     # ── Prepare RL dataset ───────────────────────────────────────────────────
-    print("Phase A: Preparing RL dataset...")
+    log.info("Phase A: Preparing RL dataset...")
     _prep_rl_parquet(config, project_root)
 
     # ── Build and launch GRPO ────────────────────────────────────────────────
-    overrides = build_verl_grpo_overrides(
-        rl_sft_cfg, project_root, wandb_enabled=wandb_enabled
-    )
+    overrides = build_verl_grpo_overrides(rl_sft_cfg, project_root, wandb_enabled=wandb_enabled)
     if extra_overrides:
         overrides.extend(extra_overrides)
 
     cmd = [
-        sys.executable, "-m", "verl.trainer.main_ppo",
+        sys.executable,
+        "-m",
+        "verl.trainer.main_ppo",
         *overrides,
     ]
-    print("Phase A — GRPO on q_φ:")
-    print("  Command:", " ".join(cmd))
+    log.info("Phase A — GRPO on q_φ:")
+    log.info("  Command:", " ".join(cmd))
 
     # Export config path so the reward manager can locate the experiment YAML
-    resolved_config_path = str(config_path) if config_path else str(
-        project_root / "config" / "latent_generation.yaml"
+    resolved_config_path = (
+        str(config_path) if config_path else str(project_root / "config" / "latent_generation.yaml")
     )
     env = {**os.environ, "C2F_CONFIG_PATH": resolved_config_path}
     return subprocess.run(cmd, cwd=project_root, env=env).returncode
@@ -264,7 +264,7 @@ def run_c2f_finetune(
 
     c2f_ft_cfg = config.get("rl", {}).get("c2f_finetune", {})
     if not c2f_ft_cfg:
-        print("Error: config['rl']['c2f_finetune'] section is missing.", file=sys.stderr)
+        log.error("config['rl']['c2f_finetune'] section is missing.")
         return 1
 
     # ── Resolve paths ────────────────────────────────────────────────────────
@@ -282,22 +282,22 @@ def run_c2f_finetune(
         sft_dataset_dir = project_root / sft_dataset_dir
 
     if not sft_model_path.exists():
-        print(f"Error: SFT model not found: {sft_model_path}", file=sys.stderr)
-        print("Run Phase A (--phase sft) first.", file=sys.stderr)
+        log.error(f"SFT model not found: {sft_model_path}")
+        log.error("Run Phase A (--phase sft) first.")
         return 1
 
     # ── Step 1: Load prompts ─────────────────────────────────────────────────
     sft_parquet = sft_dataset_dir / "train.parquet"
     if not sft_parquet.exists():
-        print(f"Error: SFT parquet not found: {sft_parquet}", file=sys.stderr)
+        log.error(f"SFT parquet not found: {sft_parquet}")
         return 1
 
     ds = load_dataset("parquet", data_files=str(sft_parquet), split="train")
     prompts: list[str] = list(ds["prompt"])
     num_samples = c2f_ft_cfg.get("num_samples")
     if num_samples is not None:
-        prompts = prompts[:int(num_samples)]
-    print(f"Phase B — Step 1: Generating z ~ q_φ for {len(prompts):,} prompts...")
+        prompts = prompts[: int(num_samples)]
+    log.error(f"Phase B — Step 1: Generating z ~ q_φ for {len(prompts):,} prompts...")
 
     # ── Step 2: Generate z ~ q_φ(·|x) with frozen SFT ──────────────────────
     gen_config = config.get("generation", {})
@@ -317,14 +317,12 @@ def run_c2f_finetune(
     )
 
     # ── Step 3: Verify and flatten ───────────────────────────────────────────
-    print("Phase B — Step 2: Verifying and flattening outputs...")
-    filtered_prompts, filtered_outputs, stats = verify_and_filter_outputs(
-        prompts, outputs, config
-    )
-    print(str(stats))
+    log.info("Phase B — Step 2: Verifying and flattening outputs...")
+    filtered_prompts, filtered_outputs, stats = verify_and_filter_outputs(prompts, outputs, config)
+    log.info(str(stats))
 
     if not filtered_prompts:
-        print("Error: No valid outputs after verification.", file=sys.stderr)
+        log.error("No valid outputs after verification.")
         return 1
 
     c2f_parquet_path = flatten_for_c2f(
@@ -333,15 +331,13 @@ def run_c2f_finetune(
         output_dir=generation_output_dir,
         filename="c2f_finetune.parquet",
     )
-    print(f"  Saved {len(filtered_prompts):,} samples to {c2f_parquet_path}")
+    log.error(f"  Saved {len(filtered_prompts):,} samples to {c2f_parquet_path}")
 
     # ── Step 4: Fine-tune C2F ────────────────────────────────────────────────
-    print("Phase B — Step 3: Fine-tuning C2F model on q_φ samples...")
+    log.info("Phase B — Step 3: Fine-tuning C2F model on q_φ samples...")
 
     c2f_train_cfg = config.get("c2f_training", {})
-    tokenizer_dir = Path(
-        c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer")
-    )
+    tokenizer_dir = Path(c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
     if not tokenizer_dir.is_absolute():
         tokenizer_dir = project_root / tokenizer_dir
 
@@ -404,7 +400,7 @@ def run_c2f_finetune(
 
     trainer.train()
     trainer.save_model()
-    print(f"Phase B complete. C2F model saved to: {training_args.output_dir}")
+    log.info(f"Phase B complete. C2F model saved to: {training_args.output_dir}")
     return 0
 
 
@@ -446,48 +442,52 @@ def run_joint(
 
     rl_joint_cfg = config.get("rl", {}).get("joint", {})
     if not rl_joint_cfg:
-        print("Error: config['rl']['joint'] section is missing.", file=sys.stderr)
+        log.error("config['rl']['joint'] section is missing.")
         return 1
 
-    num_gpus = int(rl_joint_cfg.get("num_gpus", 1))
+    int(rl_joint_cfg.get("num_gpus", 1))
 
     # ── Validate checkpoint paths ────────────────────────────────────────────
     c2f_model_path = Path(rl_joint_cfg.get("c2f_model_path", "checkpoints/decoder"))
     if not c2f_model_path.is_absolute():
         c2f_model_path = project_root / c2f_model_path
     if not c2f_model_path.exists():
-        print(f"Error: C2F model not found: {c2f_model_path}", file=sys.stderr)
-        print("Run step 6 (06_train_decoder.py) first.", file=sys.stderr)
+        log.error(f"C2F model not found: {c2f_model_path}")
+        log.error("Run step 6 (06_train_decoder.py) first.")
         return 1
 
     sft_model_path = Path(rl_joint_cfg.get("model_path", "checkpoints/sft"))
     if not sft_model_path.is_absolute():
         sft_model_path = project_root / sft_model_path
     if not sft_model_path.exists():
-        print(f"Error: SFT model not found: {sft_model_path}", file=sys.stderr)
-        print("Run step 4 (04_sft_train.py) first.", file=sys.stderr)
+        log.error(f"SFT model not found: {sft_model_path}")
+        log.error("Run step 4 (04_sft_train.py) first.")
         return 1
 
     # ── Prepare RL dataset ───────────────────────────────────────────────────
-    print("Joint: Preparing RL dataset...")
+    log.info("Joint: Preparing RL dataset...")
     _prep_rl_parquet(config, project_root, rl_section="joint")
 
     # ── Build and launch REINFORCE ───────────────────────────────────────────
     overrides = build_verl_joint_overrides(
-        rl_joint_cfg, project_root, wandb_enabled=wandb_enabled,
+        rl_joint_cfg,
+        project_root,
+        wandb_enabled=wandb_enabled,
     )
     if extra_overrides:
         overrides.extend(extra_overrides)
 
     cmd = [
-        sys.executable, "-m", "verl.trainer.main_ppo",
+        sys.executable,
+        "-m",
+        "verl.trainer.main_ppo",
         *overrides,
     ]
-    print("Joint — REINFORCE on q_φ + MLE on p_θ:")
-    print("  Command:", " ".join(cmd))
+    log.info("Joint — REINFORCE on q_φ + MLE on p_θ:")
+    log.info("  Command:", " ".join(cmd))
 
-    resolved_config_path = str(config_path) if config_path else str(
-        project_root / "config" / "latent_generation.yaml"
+    resolved_config_path = (
+        str(config_path) if config_path else str(project_root / "config" / "latent_generation.yaml")
     )
     env = {
         **os.environ,

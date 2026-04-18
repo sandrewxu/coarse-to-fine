@@ -4,6 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
+
 
 def analyze_batch_output(
     output_file: Path,
@@ -53,7 +57,9 @@ def analyze_batch_output(
                 requests_with_cache += 1
 
     total_uncached_tokens = total_prompt_tokens - total_cached_tokens
-    avg_completion = sum(completion_token_list) / len(completion_token_list) if completion_token_list else 0
+    avg_completion = (
+        sum(completion_token_list) / len(completion_token_list) if completion_token_list else 0
+    )
 
     cost_uncached = (total_uncached_tokens / 1_000_000) * input_price_per_m
     cost_cached = (total_cached_tokens / 1_000_000) * cached_price_per_m
@@ -64,18 +70,24 @@ def analyze_batch_output(
     savings = cost_no_cache - total_cost
 
     # Print report
-    print(f"{'=' * 60}")
-    print("BATCH API COST ANALYSIS")
-    print(f"{'=' * 60}")
-    print(f"\nFile: {output_file}")
-    print(f"Total Requests: {total_requests:,}")
+    log.info(f"{'=' * 60}")
+    log.info("BATCH API COST ANALYSIS")
+    log.info(f"{'=' * 60}")
+    log.info(f"\nFile: {output_file}")
+    log.info(f"Total Requests: {total_requests:,}")
     if total_requests > 0:
-        print(f"Requests with Cache: {requests_with_cache:,} ({100 * requests_with_cache / total_requests:.1f}%)")
-    print(f"\nPrompt Tokens: {total_prompt_tokens:,} (uncached: {total_uncached_tokens:,}, cached: {total_cached_tokens:,})")
-    print(f"Completion Tokens: {total_completion_tokens:,} (reasoning: {total_reasoning_tokens:,})")
-    print(f"Avg Completion: {avg_completion:.1f}")
-    print(f"\nCost: ${total_cost:.4f} (savings from cache: ${savings:.4f})")
-    print(f"{'=' * 60}")
+        log.info(
+            f"Requests with Cache: {requests_with_cache:,} ({100 * requests_with_cache / total_requests:.1f}%)"
+        )
+    log.info(
+        f"\nPrompt Tokens: {total_prompt_tokens:,} (uncached: {total_uncached_tokens:,}, cached: {total_cached_tokens:,})"
+    )
+    log.info(
+        f"Completion Tokens: {total_completion_tokens:,} (reasoning: {total_reasoning_tokens:,})"
+    )
+    log.info(f"Avg Completion: {avg_completion:.1f}")
+    log.info(f"\nCost: ${total_cost:.4f} (savings from cache: ${savings:.4f})")
+    log.info(f"{'=' * 60}")
 
     return {
         "total_requests": total_requests,

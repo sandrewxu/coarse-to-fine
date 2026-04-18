@@ -1,5 +1,9 @@
+"""C2FConfig — Qwen3Config extended with the multi-scale sequence layout."""
+
 import math
+
 from transformers import Qwen3Config
+
 
 class C2FConfig(Qwen3Config):
     r"""

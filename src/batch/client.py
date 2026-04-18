@@ -11,14 +11,12 @@ def create_client() -> OpenAI:
     Expects ``OPENAI_API_KEY`` (required).  Optionally reads
     ``OPENAI_ORGANIZATION`` and ``OPENAI_PROJECT``.
 
-    Call ``src.utils.env.load_env()`` before this to populate the
+    Call ``src.common.env.load_env()`` before this to populate the
     environment from ``.env``.
     """
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY not set. Add it to .env or export it."
-        )
+        raise RuntimeError("OPENAI_API_KEY not set. Add it to .env or export it.")
 
     kwargs: dict = {"api_key": api_key}
 

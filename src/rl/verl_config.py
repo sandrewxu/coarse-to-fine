@@ -6,6 +6,7 @@ PPO/GRPO/REINFORCE trainer.
 
 Pattern mirrors scripts/04_sft_train.py:build_overrides.
 """
+
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +55,9 @@ def build_verl_grpo_overrides(
     # If it looks like an HF hub id (no path separators, not a local dir) leave as-is.
     model_path_resolved = Path(model_path)
     if not model_path_resolved.is_absolute() and (
-        "/" in model_path or model_path_resolved.exists() or (project_root / model_path_resolved).exists()
+        "/" in model_path
+        or model_path_resolved.exists()
+        or (project_root / model_path_resolved).exists()
     ):
         candidate = project_root / model_path_resolved
         if candidate.exists():
@@ -149,7 +152,9 @@ def build_verl_joint_overrides(
 
     model_path_resolved = Path(model_path)
     if not model_path_resolved.is_absolute() and (
-        "/" in model_path or model_path_resolved.exists() or (project_root / model_path_resolved).exists()
+        "/" in model_path
+        or model_path_resolved.exists()
+        or (project_root / model_path_resolved).exists()
     ):
         candidate = project_root / model_path_resolved
         if candidate.exists():
@@ -180,7 +185,7 @@ def build_verl_joint_overrides(
         "++actor_rollout_ref.rollout.name=vllm",
         "++actor_rollout_ref.rollout.n=1",
         f"++actor_rollout_ref.rollout.tensor_model_parallel_size={num_gpus}",
-        f"++actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
+        "++actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
         f"++actor_rollout_ref.rollout.temperature={rl_joint_config.get('temperature', 1.0)}",
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
         "++actor_rollout_ref.actor.use_kl_loss=false",
@@ -218,5 +223,3 @@ def build_verl_joint_overrides(
         overrides.append("++trainer.logger=['console']")
 
     return overrides
-
-

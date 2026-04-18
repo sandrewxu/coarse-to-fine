@@ -1,4 +1,5 @@
 """Tests for config loading and derived fields."""
+
 import sys
 from pathlib import Path
 

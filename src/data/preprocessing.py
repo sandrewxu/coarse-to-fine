@@ -2,6 +2,9 @@
 
 import glob
 from pathlib import Path
+from src.common.logging import get_logger
+
+log = get_logger(__name__)
 
 
 def preprocess_tinystories(src_dir: str | Path, words_per_chunk: int = 32) -> None:
@@ -19,12 +22,12 @@ def preprocess_tinystories(src_dir: str | Path, words_per_chunk: int = 32) -> No
         words_per_chunk: Number of words per output chunk.
     """
     src_dir = str(src_dir)
-    print(f"Preprocessing TinyStories: splitting into {words_per_chunk}-word chunks...")
+    log.info(f"Preprocessing TinyStories: splitting into {words_per_chunk}-word chunks...")
 
     txt_files = glob.glob(f"{src_dir}/**/*.txt", recursive=True)
 
     for txt_file in txt_files:
-        print(f"Processing {txt_file}...")
+        log.info(f"Processing {txt_file}...")
         with open(txt_file, "r", encoding="utf-8") as f:
             content = f.read()
 
@@ -43,6 +46,6 @@ def preprocess_tinystories(src_dir: str | Path, words_per_chunk: int = 32) -> No
             for chunk in all_chunks:
                 f.write(chunk + "\n")
 
-        print(f"  Created {len(all_chunks)} chunks from {len(stories)} stories")
+        log.info(f"  Created {len(all_chunks)} chunks from {len(stories)} stories")
 
-    print("Preprocessing complete!")
+    log.info("Preprocessing complete!")

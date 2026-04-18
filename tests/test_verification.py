@@ -1,10 +1,11 @@
 """Tests for space-based verification logic."""
+
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.verification import verify, Layer, VerificationResult
+from src.verification import verify
 
 CONSTRAINTS = {"z_4": 2, "z_3": 4, "z_2": 8, "z_1": 16}
 
@@ -30,7 +31,7 @@ def test_valid_content_passes():
 def test_layer_names_parsed():
     content = _make_content()
     result = verify(content, CONSTRAINTS)
-    names = [l.name for l in result.layers]
+    names = [layer.name for layer in result.layers]
     assert names == ["z_4", "z_3", "z_2", "z_1"]
 
 
