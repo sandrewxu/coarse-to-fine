@@ -528,7 +528,7 @@ python scripts/05_generate_local.py \
 # Backward compat — generate from a parquet file:
 python scripts/05_generate_local.py \
   --data data/sft_dataset/train.parquet \
-  --model checkpoints/sft/global_step_292/huggingface \
+  --model checkpoints/sft/checkpoint-1172 \
   --output-dir data/local_generations
 ```
 

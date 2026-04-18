@@ -6,19 +6,19 @@ Usage:
     # Generate from chunk files (raw documents):
     python scripts/05_generate_local.py \
         --chunks 0 1 2 3 \
-        --model checkpoints/sft/global_step_292/huggingface \
+        --model checkpoints/sft/checkpoint-1172 \
         --config config/latent_generation.yaml
 
     # Generate from a parquet file (backward compat):
     python scripts/05_generate_local.py \
         --data data/sft_dataset/train.parquet \
-        --model checkpoints/sft/global_step_292/huggingface \
+        --model checkpoints/sft/checkpoint-1172 \
         --output-dir data/local_generations
 
     # Subset of samples:
     python scripts/05_generate_local.py \
         --chunks 0 \
-        --model checkpoints/sft/global_step_292/huggingface \
+        --model checkpoints/sft/checkpoint-1172 \
         --config config/latent_generation.yaml \
         --num-samples 1000
 """

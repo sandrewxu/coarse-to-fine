@@ -27,7 +27,7 @@ generation:
 # Step 07: RL checkpoints
 rl:
   sft_rl:
-    model_path: "checkpoints/sft/global_step_292/huggingface"
+    model_path: "checkpoints/sft/checkpoint-1172"
   c2f_finetune:
     model_path: "checkpoints/decoder"
   joint:
