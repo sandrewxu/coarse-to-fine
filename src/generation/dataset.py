@@ -175,28 +175,40 @@ def build_rl_parquet(
     project_root: Path,
     *,
     rl_section: str = "sft_rl",
+    split: str = "rl",
 ) -> Path:
-    """Build the RL training parquet from the RL-split JSONL.
+    """Build an RL parquet (train or val) from a JSONL document split.
 
-    Reads raw documents from ``dataset.rl_split`` and creates a veRL-compatible
-    parquet with three columns:
+    Reads raw documents from ``dataset.rl_split`` (or ``dataset.val_split`` when
+    ``split="val"``) and creates a veRL-compatible parquet with columns:
 
     - ``prompt``: the raw document text wrapped as a chat message (input to
       ``q_φ`` during rollout).
     - ``ground_truth``: copy of the document (used by the reward manager to run
       the C2F forward pass).
     - ``data_source``: literal ``"latent_generation"``.
+    - ``is_validation``: bool flag. False for train, True for val. Read by the
+      reward manager to skip p_θ updates on validation samples (veRL's
+      ``agent_loop._compute_score`` drops ``meta_info``, so the ``validate``
+      flag can't reach ``run_single`` any other way).
 
     Args:
         config: Full experiment config.
         project_root: Repo root, used to resolve relative paths in the config.
         rl_section: Which RL subsection holds the dataset_dir (``"sft_rl"`` or
             ``"joint"``).
+        split: ``"rl"`` for the training split (reads ``dataset.rl_split``,
+            writes ``sft_rl.parquet``); ``"val"`` for the validation split
+            (reads ``dataset.val_split``, writes ``sft_rl_val.parquet``).
 
     Returns:
         Path to the written parquet. If a parquet already exists at the target
         path, it is kept and returned as-is (idempotent).
     """
+    if split not in ("rl", "val"):
+        raise ValueError(f"split must be 'rl' or 'val', got {split!r}")
+    is_validation = split == "val"
+
     rl_cfg = config["rl"][rl_section]
 
     rl_dataset_dir = Path(rl_cfg.get("dataset_dir", "data/rl_dataset"))
@@ -204,7 +216,8 @@ def build_rl_parquet(
         rl_dataset_dir = project_root / rl_dataset_dir
     rl_dataset_dir.mkdir(parents=True, exist_ok=True)
 
-    rl_parquet = rl_dataset_dir / "sft_rl.parquet"
+    filename = "sft_rl_val.parquet" if is_validation else "sft_rl.parquet"
+    rl_parquet = rl_dataset_dir / filename
     if rl_parquet.exists():
         log.info("RL parquet already exists: %s", rl_parquet)
         return rl_parquet
@@ -213,25 +226,32 @@ def build_rl_parquet(
     data_dir = Path(dataset_cfg.get("data_dir", "data/tinystoriesv2_shuffled"))
     if not data_dir.is_absolute():
         data_dir = project_root / data_dir
-    rl_split_file = data_dir / dataset_cfg.get("rl_split", "tinystoriesv2.rl.jsonl")
 
-    if not rl_split_file.exists():
+    split_key = "val_split" if is_validation else "rl_split"
+    default_filename = (
+        "tinystoriesv2.val.jsonl" if is_validation else "tinystoriesv2.rl.jsonl"
+    )
+    split_file = data_dir / dataset_cfg.get(split_key, default_filename)
+
+    if not split_file.exists():
         raise FileNotFoundError(
-            f"RL split not found: {rl_split_file}\nRun step 0 (00_prepare_data.py) first."
+            f"{split!r} split not found: {split_file}\n"
+            "Run step 0 (00_prepare_data.py) first."
         )
 
-    log.info("Preparing RL parquet from %s ...", rl_split_file)
-    docs = load_documents_from_jsonl([rl_split_file])
+    log.info("Preparing %s parquet from %s ...", split, split_file)
+    docs = load_documents_from_jsonl([split_file])
 
     records = [
         {
             "prompt": [{"role": "user", "content": doc}],
             "ground_truth": doc,
             "data_source": "latent_generation",
+            "is_validation": is_validation,
         }
         for doc in docs
     ]
     ds = Dataset.from_list(records)
     ds.to_parquet(str(rl_parquet))
-    log.info("Saved RL parquet: %s (%d samples)", rl_parquet, len(ds))
+    log.info("Saved %s parquet: %s (%d samples)", split, rl_parquet, len(ds))
     return rl_parquet

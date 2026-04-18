@@ -291,12 +291,19 @@ class JointC2FRewardManager(RewardManagerBase):
 
     async def run_single(self, data) -> dict:
         c = self.components
-        is_validate = bool(data.meta_info.get("validate", False))
         data_item = data[0]
+        # veRL's agent_loop._compute_score strips meta_info when building the
+        # per-sample DataProto, so the trainer's ``validate`` flag doesn't reach
+        # us that way. We source it from the ``is_validation`` parquet column
+        # instead (see src/generation/dataset.py:build_rl_parquet); meta_info is
+        # a fallback for legacy parquets that lack the column.
+        nt = data_item.non_tensor_batch
+        is_validate = bool(
+            nt.get("is_validation", data.meta_info.get("validate", False))
+        )
         response_ids = data_item.batch["responses"]
         response_str = c.sft_tokenizer.decode(response_ids.tolist(), skip_special_tokens=True)
 
-        nt = data_item.non_tensor_batch
         rm = nt.get("reward_model")
         gt = rm.get("ground_truth", "") if isinstance(rm, dict) else nt.get("ground_truth", "")
 

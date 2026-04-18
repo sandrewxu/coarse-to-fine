@@ -161,6 +161,7 @@ def build_verl_joint_overrides(
             model_path = str(candidate)
 
     train_parquet = dataset_dir / "sft_rl.parquet"
+    val_parquet = dataset_dir / "sft_rl_val.parquet"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     overrides = [
@@ -172,7 +173,7 @@ def build_verl_joint_overrides(
         "++actor_rollout_ref.actor.fsdp_config.model_dtype=bf16",
         # ── Data ────────────────────────────────────────────────────────────
         f"++data.train_files={train_parquet}",
-        f"++data.val_files={train_parquet}",
+        f"++data.val_files={val_parquet}",
         "++data.prompt_key=prompt",
         f"++data.max_prompt_length={rl_joint_config.get('max_prompt_length', 256)}",
         f"++data.max_response_length={rl_joint_config.get('max_response_length', 256)}",

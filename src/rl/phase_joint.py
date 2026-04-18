@@ -56,8 +56,9 @@ def run_joint(
     if not ok:
         return 1
 
-    log.info("Joint: Preparing RL dataset...")
-    build_rl_parquet(config, project_root, rl_section="joint")
+    log.info("Joint: Preparing RL datasets (train + val)...")
+    build_rl_parquet(config, project_root, rl_section="joint", split="rl")
+    build_rl_parquet(config, project_root, rl_section="joint", split="val")
 
     overrides = build_verl_joint_overrides(rl_joint_cfg, project_root, wandb_enabled=wandb_enabled)
     if extra_overrides:
