@@ -52,26 +52,30 @@ def main() -> int:
 
     config = load_config(args.config)
     scale_lengths = config["scale_lengths"]
+    gen_cfg = config.get("generation", {})
+    top_k = gen_cfg.get("top_k", 50)
+    # vLLM convention: top_k=-1 means "no top-k filtering"; HF uses 0 for the same.
+    top_k = max(0, top_k)
 
     # ── Load model ───────────────────────────────────────────────────────────
-    from src.qwen3_joint.configuration import C2FConfig
-    from src.qwen3_joint.modeling import C2FForCausalLM
+    from src.c2f_model.configuration import C2FConfig
+    from src.c2f_model.modeling import C2FForCausalLM
 
     log.info(f"Loading C2F model from {args.checkpoint} (causal mode)...")
     model_config = C2FConfig.from_pretrained(str(args.checkpoint))
     model_config.mask_type = "causal"
     model = C2FForCausalLM(model_config)
 
-    from src.rl.reward import _load_c2f_weights
+    from src.rl.common import load_c2f_weights
 
-    model = _load_c2f_weights(model, args.checkpoint)
+    model = load_c2f_weights(model, args.checkpoint)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
 
     # ── Load tokenizer ───────────────────────────────────────────────────────
-    from src.c2f_training.tokenizer import load_or_train_space_tokenizer
+    from src.c2f_model.training.tokenizer import load_or_train_space_tokenizer
 
     c2f_cfg = config.get("c2f_training", {})
     tokenizer_dir = args.tokenizer_dir or Path(
@@ -103,7 +107,7 @@ def main() -> int:
                 max_new_tokens=content_len - 1,  # BOS already provided
                 do_sample=args.temperature > 0,
                 temperature=args.temperature if args.temperature > 0 else 1.0,
-                top_k=50,
+                top_k=top_k,
                 pad_token_id=tokenizer.eos_token_id,
             )
 

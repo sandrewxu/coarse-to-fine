@@ -27,9 +27,9 @@ def run_c2f_finetune(
     # in CI without the GPU stack.
     from datasets import load_dataset
 
-    from src.c2f_training.dataset import C2FDataset
-    from src.c2f_training.tokenizer import load_or_train_space_tokenizer
-    from src.c2f_training.train import C2FTrainer, build_training_args, load_c2f_model
+    from src.c2f_model.training.dataset import C2FDataset
+    from src.c2f_model.training.tokenizer import load_or_train_space_tokenizer
+    from src.c2f_model.training.train import C2FTrainer, build_training_args, load_c2f_model
     from src.generation.dataset import flatten_for_c2f, verify_and_filter_outputs
     from src.generation.inference import generate
 

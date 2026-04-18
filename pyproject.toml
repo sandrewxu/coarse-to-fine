@@ -101,9 +101,10 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["PLR2004", "S101", "F401"]            # unused imports fine in test stubs
 "scripts/*" = ["E402", "PLR0911", "PLR0912", "PLR0915"]  # sys.path bootstrap + long main()
-"src/qwen3_joint/modeling.py" = ["PLR0912", "PLR0915"]    # forked model code
+"src/c2f_model/modeling.py" = ["PLR0912", "PLR0915"]    # forked model code
 "src/rl/*" = ["PLR0912", "PLR0915"]                # reward / phase code is unavoidably branchy
 "src/sft/train.py" = ["PLR0915"]                   # HF Trainer setup is linear and long
+"src/eval/c2f.py" = ["PLR0915"]                    # eval loop is unavoidably linear
 "src/verification/verifier.py" = ["PLR0911"]       # validation cascade with multiple early returns
 
 [tool.ruff.format]
@@ -123,4 +124,4 @@ filterwarnings = [
 
 [tool.coverage.run]
 source = ["src"]
-omit = ["src/qwen3_joint/modeling.py"]  # forked model code; coverage not meaningful
+omit = ["src/c2f_model/modeling.py"]  # forked model code; coverage not meaningful

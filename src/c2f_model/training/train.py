@@ -12,9 +12,9 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, Trainer, TrainingArguments
 
+from src.c2f_model.configuration import C2FConfig
+from src.c2f_model.modeling import C2FForCausalLM
 from src.common.logging import get_logger
-from src.qwen3_joint.configuration import C2FConfig
-from src.qwen3_joint.modeling import C2FForCausalLM
 
 log = get_logger(__name__)
 
@@ -195,7 +195,7 @@ class C2FTrainer(Trainer):
 
     def __init__(
         self, *args, scale_lengths: list[int] | None = None, mask_type: str = "block", **kwargs
-    ):
+    ) -> None:
         super().__init__(*args, **kwargs)
         scale_lengths = scale_lengths or [2, 4, 8, 16, 32]
         self._mask_type = mask_type

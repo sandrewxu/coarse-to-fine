@@ -37,7 +37,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 from transformers.processing_utils import Unpack
 
-from src.qwen3_joint.configuration import C2FConfig
+from src.c2f_model.configuration import C2FConfig
 
 # Compat: these decorators/types were added in transformers 4.52; provide
 # no-op fallbacks so the model works with 4.51 (shipped by verl / vllm).

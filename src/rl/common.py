@@ -22,10 +22,10 @@ from typing import Any, Literal
 
 import torch
 
-from src.c2f_training.tokenizer import load_or_train_space_tokenizer
+from src.c2f_model.configuration import C2FConfig
+from src.c2f_model.modeling import C2FForCausalLM
+from src.c2f_model.training.tokenizer import load_or_train_space_tokenizer
 from src.common.logging import get_logger
-from src.qwen3_joint.configuration import C2FConfig
-from src.qwen3_joint.modeling import C2FForCausalLM
 from src.verification import verify as verify_layers
 
 log = get_logger(__name__)

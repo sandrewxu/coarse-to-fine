@@ -181,7 +181,7 @@ $$\boxed{
 
 ## Model Architecture
 
-The joint model $p_\theta$ is `C2FForCausalLM` (`src/qwen3_joint/`), a Qwen3 transformer with three architectural modifications. Every change from the Qwen3 base is marked with a `# C2F:` comment in the source.
+The joint model $p_\theta$ is `C2FForCausalLM` (`src/c2f_model/`), a Qwen3 transformer with three architectural modifications. Every change from the Qwen3 base is marked with a `# C2F:` comment in the source.
 
 ### Sequence Layout
 
@@ -598,7 +598,7 @@ python scripts/07_rl_train.py --phase both --config config/latent_generation.yam
 python scripts/07_rl_train.py --phase joint --config config/latent_generation.yaml
 ```
 
-The joint phase uses `JointC2FRewardManager` (`src/rl/reward.py`) to run a trainable $p_\theta$ inside the reward loop: per rollout sample, $p_\theta$ takes an MLE gradient step on $(z, x)$ and the `-CE_loss` is returned as the reward. $q_\phi$ is updated with REINFORCE via veRL. Malformed rollouts receive a negative reward (`rl.joint.malformed_reward`). Checkpoints are saved every `c2f_save_steps` under `checkpoints/rl/joint/c2f/`.
+The joint phase uses `JointC2FRewardManager` (`src/rl/reward_joint.py`) to run a trainable $p_\theta$ inside the reward loop: per rollout sample, $p_\theta$ takes an MLE gradient step on $(z, x)$ and the `-CE_loss` is returned as the reward. $q_\phi$ is updated with REINFORCE via veRL. Malformed rollouts receive a negative reward (`rl.joint.malformed_reward`). Checkpoints are saved every `c2f_save_steps` under `checkpoints/rl/joint/c2f/`.
 
 Dot-path overrides (e.g. `rl.sft_rl.epochs=1`) update the in-memory config. Non-`rl.*` overrides are forwarded as Hydra overrides to the veRL trainer.
 

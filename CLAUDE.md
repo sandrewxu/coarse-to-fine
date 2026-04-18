@@ -8,7 +8,7 @@ attention-mask diagrams live in `README.md` — read that first for the *what* a
 
 ## Repo map
 
-- `src/` — pipeline modules. See `src/qwen3_joint/README.md` (model fork) and
+- `src/` — pipeline modules. See `src/c2f_model/README.md` (model fork) and
   `src/rl/README.md` (RL phases + veRL coupling) for the two non-obvious folders.
 - `scripts/` — numbered `00_…_09_*.py` entry points, one per pipeline step.
   Matching `slurm_*.sh` wrappers for HPC submission.
@@ -44,7 +44,7 @@ sbatch scripts/slurm_0N_*.sh
 - **`src/config.py` is the single source of truth for defaults.** YAML overrides
   only what differs; CLI flags (script 07 only) override YAML. Do **not** add
   YAML-only fields without adding a Pydantic field — the loader silently drops them.
-- **`# C2F:` annotations.** Every line in `src/qwen3_joint/modeling.py` that
+- **`# C2F:` annotations.** Every line in `src/c2f_model/modeling.py` that
   diverges from upstream `transformers.models.qwen3.modeling_qwen3` is marked
   `# C2F:`. Preserve this when editing — it's how the upstream diff is auditable.
   When you *remove* a line, leave a `# C2F: removed — <original>` stub.
@@ -53,7 +53,7 @@ sbatch scripts/slurm_0N_*.sh
   script in `scripts/` for the pattern.
 - **Space tokenizer = one word per token.** This is what guarantees scale
   boundaries land at deterministic positions. Do not replace it without
-  rewriting `C2FDataset` and the C2F input builders in `src/rl/reward.py`.
+  rewriting `C2FDataset` and the C2F input builders in `src/rl/common.py`.
 
 ## Gotchas (things that have bitten us)
 
@@ -75,7 +75,8 @@ sbatch scripts/slurm_0N_*.sh
 - **`verl` upstream is moving.** `pyproject.toml` pins `verl>=0.7.0` (PyPI). If
   veRL refactors `RewardManagerBase` (currently at
   `verl.experimental.reward_loop.reward_manager.base`), the imports in
-  `src/rl/reward.py` are the canary — they'll break loudly.
+  `src/rl/reward_sft.py` and `src/rl/reward_joint.py` are the canary — they'll
+  break loudly.
 
 ## Where to add things
 
@@ -84,7 +85,7 @@ sbatch scripts/slurm_0N_*.sh
 | New pipeline step | numbered `scripts/NN_*.py` + matching `slurm_NN_*.sh` + new section in `README.md` "Running the Pipeline" + new Pydantic section in `src/config.py` |
 | New dataset | register in `src/data/registry.py` + add a preprocess fn in `src/data/preprocessing.py` |
 | New RL reward shaping | edit `src/rl/reward_sft.py` (Phase A) or `src/rl/reward_joint.py` (joint); shared helpers live in `src/rl/common.py`. Phase dispatch is in `scripts/07_rl_train.py` (`--phase {sft,c2f,joint,both}`). |
-| New attention variant | edit `src/qwen3_joint/modeling.py`, add a `create_*_mask` function, gate via `C2FConfig.mask_type`, mark every change with `# C2F:` |
+| New attention variant | edit `src/c2f_model/modeling.py`, add a `create_*_mask` function, gate via `C2FConfig.mask_type`, mark every change with `# C2F:` |
 | New batch-API prompt | drop a file under `prompts/{system_prompts,user_prompts,few_shot_examples}/` and reference it by filename in `config.batch` |
 
 ## Do not
@@ -93,4 +94,4 @@ sbatch scripts/slurm_0N_*.sh
 - Add YAML-only config fields (loader silently drops them).
 - Reintroduce RoPE in `C2FAttention` — positions come from `C2FScaleEmbedding`.
 - Run `--no-verify` to bypass pre-commit. If a hook fails, fix the underlying issue.
-- Skip the `# C2F:` annotation when modifying `src/qwen3_joint/modeling.py`.
+- Skip the `# C2F:` annotation when modifying `src/c2f_model/modeling.py`.

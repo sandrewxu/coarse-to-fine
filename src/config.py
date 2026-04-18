@@ -91,6 +91,7 @@ class SftConfig(BaseModel):
     train_batch_size: int = 64
     epochs: int = 2
     lr: float = 1.0e-5
+    seed: int = 42
 
 
 class GenerationConfig(BaseModel):
@@ -194,6 +195,8 @@ class JointConfig(BaseModel):
     ppo_micro_batch_size_per_gpu: int = 16
     dataloader_num_workers: int = 4
     epochs: int = 1
+    c2f_micro_batch_size: int = 32
+    c2f_keep_last_n: int = 3
 
 
 class RlConfig(BaseModel):

@@ -31,8 +31,14 @@ def _vllm_worker(
 
     from vllm import LLM, SamplingParams
 
+    from src.common.constants import VLLM_MAX_MODEL_LEN, VLLM_MAX_NUM_SEQS
+
     llm = LLM(
-        model=model_path, seed=seed, trust_remote_code=True, max_model_len=1024, max_num_seqs=1024
+        model=model_path,
+        seed=seed,
+        trust_remote_code=True,
+        max_model_len=VLLM_MAX_MODEL_LEN,
+        max_num_seqs=VLLM_MAX_NUM_SEQS,
     )
     sampling_params = SamplingParams(**sampling_kwargs)
     tokenizer = llm.get_tokenizer()

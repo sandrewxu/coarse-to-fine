@@ -135,15 +135,15 @@ def main() -> int:
     log.info(f"Dataset: {data_path} (format={dataset_format})")
 
     # Tokenizer
-    from src.c2f_training.dataset import C2FDataset
-    from src.c2f_training.train import C2FTrainer, build_training_args, load_c2f_model
+    from src.c2f_model.training.dataset import C2FDataset
+    from src.c2f_model.training.train import C2FTrainer, build_training_args, load_c2f_model
 
     tokenizer_type = c2f_cfg.get("tokenizer", "space")
     tokenizer = None
     vocab_size = None
 
     if tokenizer_type == "space":
-        from src.c2f_training.tokenizer import load_or_train_space_tokenizer
+        from src.c2f_model.training.tokenizer import load_or_train_space_tokenizer
 
         tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
         if not tokenizer_dir.is_absolute():

@@ -61,7 +61,7 @@ class C2FDataset(TorchDataset):
         parquet_filename: str | None = None,
         dataset_format: str = "c2f",
         tokenizer: PreTrainedTokenizerBase | None = None,
-    ):
+    ) -> None:
         """
         Args:
             data_dir: Directory containing the training parquet.
@@ -78,11 +78,17 @@ class C2FDataset(TorchDataset):
             tokenizer: Optional pre-built tokenizer.  When provided,
                 ``tokenizer_name_or_path`` is ignored.  Use this to pass a
                 space-based tokenizer trained by
-                :func:`src.c2f_training.tokenizer.load_or_train_space_tokenizer`.
+                :func:`src.c2f_model.training.tokenizer.load_or_train_space_tokenizer`.
         """
         if dataset_format not in self.VALID_FORMATS:
             raise ValueError(
                 f"dataset_format must be one of {self.VALID_FORMATS}, got {dataset_format!r}"
+            )
+
+        if scale_lengths is None or word_count_constraints is None:
+            raise ValueError(
+                "C2FDataset requires both scale_lengths and word_count_constraints "
+                "(typically loaded from config/latent_generation.yaml)."
             )
 
         self.dataset_format = dataset_format
@@ -216,7 +222,7 @@ class C2FDataset(TorchDataset):
 class _C2FDatasetView(TorchDataset):
     """Lightweight view over a C2FDataset with a different underlying HF dataset split."""
 
-    def __init__(self, parent: C2FDataset, hf_dataset):
+    def __init__(self, parent: C2FDataset, hf_dataset) -> None:
         self.parent = parent
         self.dataset = hf_dataset
 

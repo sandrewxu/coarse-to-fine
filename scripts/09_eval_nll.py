@@ -1,42 +1,24 @@
 #!/usr/bin/env python3
-"""
-Unified NLL evaluator for C2F experiments (AR + C2F paths).
+"""Step 9 — unified NLL evaluator for C2F experiments.
 
-Reports nats/word on a held-out test set under a fixed tokenization. Every
-model in the experiment sweep is scored through the repo's space tokenizer
-(1 word = 1 token); the script fails hard on vocab-size mismatches so that
-cross-model comparisons are not silently corrupted.
+Reports nats/word (== nats/token under the project's space tokenizer) on a
+held-out test set, with a bootstrap 95 % CI over documents. The script fails
+hard on vocab-size mismatches so cross-model comparisons are not silently
+corrupted.
 
 Model kinds
 -----------
 ``ar``
-    Standard autoregressive LM. Exact ``-log p(x)`` via shifted
-    cross-entropy on raw text tokens.
+    Standard autoregressive LM. Exact ``-log p(x)`` via shifted CE on raw text.
 
 ``c2f``
-    :class:`src.qwen3_joint.modeling.C2FForCausalLM`. Reports the C2F
-    training objective (unshifted CE for block-mask, shifted for causal)
-    as an **IWAE-1 lower bound** on the marginal ``log p(x)`` — i.e.
-    the standard ELBO, using a gold ``z`` produced by ``q_φ`` and stored
-    in the test parquet.
-
-    Tighter IWAE-K (K > 1) requires sampling multiple ``z`` per document
-    from ``q_φ`` and reweighting; that needs an inference server pass
-    and is intentionally deferred. ``--K`` is validated to be 1 for
-    ``c2f`` until that lands.
+    :class:`src.c2f_model.modeling.C2FForCausalLM`. Reports the C2F training
+    objective (unshifted CE for block-mask, shifted for causal) as an IWAE-1
+    lower bound on ``log p(x)``, using gold ``z`` from the test parquet.
+    Tighter IWAE-K is intentionally deferred (``--K`` must be 1 for now).
 
 ``diffusion``
-    Not implemented. The R4 discrete-diffusion baseline will register
-    a handler here when it is trained.
-
-Outputs
--------
-* Aggregate nats/word (equivalently nats/token, since space tokenizer is
-  1:1) with a bootstrap 95 % CI over documents.
-* Total scored tokens and document count.
-* For ``c2f``: per-scale mean nats/token (``z_4, z_3, z_2, z_1, text``).
-* Optional ``--out-jsonl``: one record per doc with
-  ``{"idx", "nll", "num_tokens", "per_scale"}``.
+    Stub. The R4 discrete-diffusion baseline will register a handler here.
 
 Examples
 --------
@@ -49,324 +31,23 @@ Examples
 
     python scripts/09_eval_nll.py \\
         --model-kind c2f --ckpt checkpoints/decoder/ \\
-        --test data/local_generations/c2f_test.parquet \\
-        --K 1
+        --test data/local_generations/c2f_test.parquet --K 1
 """
 
 import argparse
-import json
 import math
 import sys
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import torch
-from torch.utils.data import DataLoader
-
-from src.common.logging import get_logger
-
-log = get_logger(__name__)
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.common.logging import get_logger
+from src.eval import eval_ar, eval_c2f, eval_diffusion
+from src.eval.common import save_per_doc
 
-# ─── Shared helpers ────────────────────────────────────────────────────────
-
-
-def _load_space_tokenizer(config: dict[str, Any], tokenizer_dir: Path | None = None):
-    """Load the repo's space (word-level) tokenizer."""
-    from src.c2f_training.tokenizer import load_or_train_space_tokenizer
-
-    c2f_cfg = config.get("c2f_training", {})
-    if tokenizer_dir is None:
-        tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
-    if not tokenizer_dir.is_absolute():
-        tokenizer_dir = PROJECT_ROOT / tokenizer_dir
-
-    return load_or_train_space_tokenizer(
-        tokenizer_dir=tokenizer_dir,
-        data_dir=c2f_cfg.get("dataset_dir", "data/sft_dataset"),
-        dataset_format=c2f_cfg.get("dataset_format", "sft"),
-    )
-
-
-def _check_vocab_consistency(model_vocab: int, tokenizer_vocab: int) -> None:
-    """Abort on vocab mismatch — silent mismatch corrupts nats/word compares."""
-    if model_vocab != tokenizer_vocab:
-        raise RuntimeError(
-            f"Vocab mismatch: model has {model_vocab}, tokenizer has "
-            f"{tokenizer_vocab}. Cross-model nats/word comparisons require a "
-            "shared tokenizer. Re-train the baseline with the space tokenizer "
-            "at checkpoints/decoder/tokenizer."
-        )
-
-
-def _bootstrap_ci(
-    per_doc_nll: np.ndarray,
-    per_doc_tokens: np.ndarray,
-    n_resamples: int = 1000,
-    seed: int = 0,
-) -> tuple[float, float, float]:
-    """Return (mean nats/token, lo95, hi95) via token-weighted bootstrap over docs."""
-    rng = np.random.default_rng(seed)
-    n = len(per_doc_nll)
-    means = np.empty(n_resamples, dtype=np.float64)
-    for i in range(n_resamples):
-        idx = rng.integers(0, n, size=n)
-        means[i] = per_doc_nll[idx].sum() / max(per_doc_tokens[idx].sum(), 1)
-    point = per_doc_nll.sum() / max(per_doc_tokens.sum(), 1)
-    lo, hi = np.percentile(means, [2.5, 97.5])
-    return float(point), float(lo), float(hi)
-
-
-def _save_per_doc(out_path: Path, rows: list[dict]) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w") as f:
-        for row in rows:
-            f.write(json.dumps(row) + "\n")
-
-
-# ─── AR path ───────────────────────────────────────────────────────────────
-
-
-def _load_ar_jsonl(path: Path, limit: int | None) -> list[str]:
-    docs: list[str] = []
-    with path.open() as f:
-        for i, line in enumerate(f):
-            if limit is not None and i >= limit:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                docs.append(obj.get("text", obj) if isinstance(obj, dict) else obj)
-            except json.JSONDecodeError:
-                docs.append(line)
-    return docs
-
-
-@torch.no_grad()
-def eval_ar(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
-    """Exact ``-log p(x)`` under a causal LM, via shifted CE on raw text."""
-    from transformers import AutoModelForCausalLM
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    # Tokenizer: repo's space tokenizer (1 word = 1 token).
-    tokenizer = _load_space_tokenizer(config, args.tokenizer_dir)
-
-    log.error(f"Loading AR model from {args.ckpt}...")
-    model = AutoModelForCausalLM.from_pretrained(str(args.ckpt), trust_remote_code=True)
-    model.to(device)
-    model.eval()
-    _check_vocab_consistency(model.config.vocab_size, tokenizer.vocab_size)
-
-    docs = _load_ar_jsonl(args.test, args.limit)
-    log.info(f"Scoring {len(docs)} documents...")
-
-    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
-    per_doc_nll = np.empty(len(docs), dtype=np.float64)
-    per_doc_tokens = np.empty(len(docs), dtype=np.int64)
-    rows: list[dict] = []
-
-    for i, text in enumerate(docs):
-        ids = tokenizer.encode(text, add_special_tokens=False)
-        # BOS prefix so logits[0] can be used to predict the first word.
-        bos = tokenizer.bos_token_id or tokenizer.eos_token_id
-        ids = [bos, *ids]
-        input_ids = torch.tensor(ids, dtype=torch.long, device=device).unsqueeze(0)
-        out = model(input_ids=input_ids)
-        logits = out.logits[:, :-1, :]  # predict positions 1..T
-        targets = input_ids[:, 1:]
-        per_tok = loss_fn(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
-        nll = float(per_tok.sum().item())
-        n_tok = int(targets.numel())
-        per_doc_nll[i] = nll
-        per_doc_tokens[i] = n_tok
-        rows.append({"idx": i, "nll": nll, "num_tokens": n_tok})
-
-    point, lo, hi = _bootstrap_ci(per_doc_nll, per_doc_tokens)
-    return {
-        "model_kind": "ar",
-        "ckpt": str(args.ckpt),
-        "num_docs": len(docs),
-        "total_tokens": int(per_doc_tokens.sum()),
-        "nats_per_word": point,
-        "nats_per_word_ci95": [lo, hi],
-        "per_doc_rows": rows,
-    }
-
-
-# ─── C2F path ──────────────────────────────────────────────────────────────
-
-
-def _build_c2f_dataset(test_path: Path, config: dict[str, Any], tokenizer) -> Any:
-    """Build a C2FDataset over the test parquet."""
-    import pyarrow.parquet as pq
-
-    from src.c2f_training.dataset import C2FDataset
-
-    cols = pq.read_schema(str(test_path)).names
-    if "text" in cols:
-        fmt = "c2f"
-    elif "prompt" in cols and "response" in cols:
-        fmt = "sft"
-    else:
-        raise ValueError(
-            f"Cannot detect format from {test_path} (columns: {cols}). "
-            "Expected 'text' (c2f) or 'prompt'+'response' (sft)."
-        )
-
-    return C2FDataset(
-        data_dir=str(test_path.parent),
-        tokenizer=tokenizer,
-        scale_lengths=config["scale_lengths"],
-        word_count_constraints=config["word_count_constraints"],
-        text_word_count=config.get("text_word_count", 32),
-        parquet_filename=test_path.name,
-        dataset_format=fmt,
-    )
-
-
-def _scale_ranges(scale_lengths: list[int]) -> list[tuple[int, int]]:
-    """(start, end) token slices per scale, relative to the BOS-prefixed sequence."""
-    ranges: list[tuple[int, int]] = []
-    pos = 1
-    for length in scale_lengths:
-        ranges.append((pos, pos + length))
-        pos += length
-    return ranges
-
-
-@torch.no_grad()
-def eval_c2f(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
-    """ELBO (IWAE-1) on the joint ``p_θ(x, z)`` with gold ``z`` from the parquet."""
-    from src.qwen3_joint.configuration import C2FConfig
-    from src.qwen3_joint.modeling import C2FForCausalLM
-    from src.rl.common import load_c2f_weights
-
-    if args.K != 1:
-        raise NotImplementedError(
-            "IWAE-K > 1 for c2f requires sampling multiple z from q_φ per "
-            "document; the sampler will be added in a follow-up. Re-run with "
-            "--K 1 for the ELBO lower bound."
-        )
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    tokenizer = _load_space_tokenizer(config, args.tokenizer_dir)
-
-    log.info(f"Loading C2F model from {args.ckpt}...")
-    model_config = C2FConfig.from_pretrained(str(args.ckpt))
-    model = C2FForCausalLM(model_config)
-    model = load_c2f_weights(model, args.ckpt)
-    model.to(device)
-    model.eval()
-    _check_vocab_consistency(model.config.vocab_size, tokenizer.vocab_size)
-
-    dataset = _build_c2f_dataset(args.test, config, tokenizer)
-    if args.limit is not None:
-        from torch.utils.data import Subset
-
-        dataset = Subset(dataset, range(min(args.limit, len(dataset))))
-
-    log.info(f"Scoring {len(dataset)} documents...")
-
-    scale_names = ["z_4", "z_3", "z_2", "z_1", "text"]
-    scale_ranges = _scale_ranges(config["scale_lengths"])
-    mask_type = model.config.mask_type
-
-    # Per-doc and per-scale accumulators.
-    per_doc_nll = np.empty(len(dataset), dtype=np.float64)
-    per_doc_tokens = np.empty(len(dataset), dtype=np.int64)
-    per_scale_nll = {name: 0.0 for name in scale_names}
-    per_scale_tokens = {name: 0 for name in scale_names}
-    rows: list[dict] = []
-
-    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
-
-    idx = 0
-    for batch in loader:
-        input_ids = batch["input_ids"].to(device)
-        labels = batch["labels"].to(device)
-        out = model(input_ids=input_ids)
-        logits = out.logits  # [B, T, V]
-
-        if mask_type == "causal":
-            logits = logits[:, :-1, :]
-            lab = labels[:, 1:]
-        else:
-            lab = labels
-
-        B, T, V = logits.shape
-        per_tok = loss_fn(logits.reshape(-1, V), lab.reshape(-1)).view(B, T)
-        mask = (lab != -100).float()
-
-        doc_nll = (per_tok * mask).sum(dim=1).cpu().numpy()  # [B]
-        doc_tok = mask.sum(dim=1).cpu().numpy().astype(np.int64)
-
-        for b in range(B):
-            per_doc_nll[idx] = float(doc_nll[b])
-            per_doc_tokens[idx] = int(doc_tok[b])
-            per_doc_scales: dict[str, float] = {}
-            for name, (start, end) in zip(scale_names, scale_ranges, strict=False):
-                if mask_type == "causal":
-                    s_slice = slice(start - 1, end - 1)
-                else:
-                    s_slice = slice(start, end)
-                seg_tok = per_tok[b, s_slice] * mask[b, s_slice]
-                seg_n = int(mask[b, s_slice].sum().item())
-                seg_nll = float(seg_tok.sum().item())
-                per_scale_nll[name] += seg_nll
-                per_scale_tokens[name] += seg_n
-                per_doc_scales[name] = seg_nll
-            rows.append(
-                {
-                    "idx": idx,
-                    "nll": float(doc_nll[b]),
-                    "num_tokens": int(doc_tok[b]),
-                    "per_scale_nll": per_doc_scales,
-                }
-            )
-            idx += 1
-
-    point, lo, hi = _bootstrap_ci(per_doc_nll, per_doc_tokens)
-    per_scale_mean = {
-        name: (per_scale_nll[name] / per_scale_tokens[name])
-        if per_scale_tokens[name] > 0
-        else float("nan")
-        for name in scale_names
-    }
-    return {
-        "model_kind": "c2f",
-        "ckpt": str(args.ckpt),
-        "mask_type": mask_type,
-        "K": args.K,
-        "num_docs": len(dataset),
-        "total_tokens": int(per_doc_tokens.sum()),
-        "nats_per_word": point,
-        "nats_per_word_ci95": [lo, hi],
-        "per_scale_nats_per_token": per_scale_mean,
-        "per_doc_rows": rows,
-    }
-
-
-# ─── Diffusion path (stub) ─────────────────────────────────────────────────
-
-
-def eval_diffusion(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
-    raise NotImplementedError(
-        "Discrete-diffusion NLL will be added with the R4 baseline "
-        "(src/baselines/diffusion.py). Report the ELBO bound at 128 "
-        "denoising steps for comparability with C2F IWAE bounds."
-    )
-
-
-# ─── Main ──────────────────────────────────────────────────────────────────
+log = get_logger(__name__)
 
 
 def _print_summary(result: dict[str, Any]) -> None:
@@ -374,22 +55,21 @@ def _print_summary(result: dict[str, Any]) -> None:
     lo, hi = result["nats_per_word_ci95"]
     bits = mean / math.log(2)
     ppl = math.exp(mean)
-    log.info()
     log.info("=" * 60)
-    log.info(f"  model_kind       = {result['model_kind']}")
-    log.info(f"  ckpt             = {result['ckpt']}")
+    log.info("  model_kind       = %s", result["model_kind"])
+    log.info("  ckpt             = %s", result["ckpt"])
     if "mask_type" in result:
-        log.info(f"  mask_type        = {result['mask_type']}")
+        log.info("  mask_type        = %s", result["mask_type"])
     if "K" in result:
-        log.info(f"  IWAE K           = {result['K']}")
-    log.info(f"  num_docs         = {result['num_docs']}")
-    log.info(f"  total_tokens     = {result['total_tokens']}")
-    log.info(f"  nats/word        = {mean:.4f}  (bits/word = {bits:.4f}, ppl = {ppl:.2f})")
-    log.info(f"  95% CI (nats/w)  = [{lo:.4f}, {hi:.4f}]")
+        log.info("  IWAE K           = %d", result["K"])
+    log.info("  num_docs         = %d", result["num_docs"])
+    log.info("  total_tokens     = %d", result["total_tokens"])
+    log.info("  nats/word        = %.4f  (bits/word = %.4f, ppl = %.2f)", mean, bits, ppl)
+    log.info("  95%% CI (nats/w)  = [%.4f, %.4f]", lo, hi)
     if "per_scale_nats_per_token" in result:
         log.info("  per-scale nats/token:")
         for name, val in result["per_scale_nats_per_token"].items():
-            log.info(f"    {name:>5s}: {val:.4f}")
+            log.info("    %5s: %.4f", name, val)
     log.info("=" * 60)
 
 
@@ -432,24 +112,44 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.ckpt.exists():
-        log.error(f"ckpt not found: {args.ckpt}")
+        log.error("ckpt not found: %s", args.ckpt)
         return 1
     if not args.test.exists():
-        log.error(f"test file not found: {args.test}")
+        log.error("test file not found: %s", args.test)
         return 1
 
     from src.config import load_config
 
     config = load_config(args.config)
 
-    dispatch = {"ar": eval_ar, "c2f": eval_c2f, "diffusion": eval_diffusion}
-    result = dispatch[args.model_kind](args, config)
+    if args.model_kind == "ar":
+        result = eval_ar(
+            ckpt=args.ckpt,
+            test=args.test,
+            config=config,
+            limit=args.limit,
+            tokenizer_dir=args.tokenizer_dir,
+        )
+    elif args.model_kind == "c2f":
+        result = eval_c2f(
+            ckpt=args.ckpt,
+            test=args.test,
+            config=config,
+            limit=args.limit,
+            batch_size=args.batch_size,
+            tokenizer_dir=args.tokenizer_dir,
+            K=args.K,
+        )
+    elif args.model_kind == "diffusion":
+        result = eval_diffusion()
+    else:  # pragma: no cover — argparse choices guard this
+        raise ValueError(args.model_kind)
 
     _print_summary(result)
 
     if args.out_jsonl is not None:
-        _save_per_doc(args.out_jsonl, result["per_doc_rows"])
-        log.info(f"Per-doc rows saved to {args.out_jsonl}")
+        save_per_doc(args.out_jsonl, result["per_doc_rows"])
+        log.info("Per-doc rows saved to %s", args.out_jsonl)
 
     return 0
 

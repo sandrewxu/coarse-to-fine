@@ -1,4 +1,4 @@
-# `src/qwen3_joint/` — the C2F model
+# `src/c2f_model/` — the C2F model
 
 `C2FForCausalLM` is **Qwen3 with three modifications**:
 
@@ -43,7 +43,7 @@ This makes the upstream diff bidirectional and auditable.
 ```bash
 # Diff against upstream Qwen3 to see what changed there
 diff <(python -c "from transformers.models.qwen3 import modeling_qwen3; \
-  print(open(modeling_qwen3.__file__).read())") src/qwen3_joint/modeling.py
+  print(open(modeling_qwen3.__file__).read())") src/c2f_model/modeling.py
 ```
 
 Re-apply each `# C2F:` block onto the new upstream version. When you *remove* a

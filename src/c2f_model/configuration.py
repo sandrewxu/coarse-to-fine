@@ -39,7 +39,7 @@ class C2FConfig(Qwen3Config):
         #       "causal" = standard lower-triangular autoregressive mask.
         mask_type: str = "block",
         **kwargs,
-    ):
+    ) -> None:
         # C2F: default scale layout matching the plan: 4 latent scales + text.
         if scale_lengths is None:
             scale_lengths = [2, 4, 8, 16, 32]

@@ -37,7 +37,7 @@ class JointC2FRewardManager(RewardManagerBase):
         tokenizer,
         compute_score=None,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__(config, tokenizer, compute_score)
 
         exp_config = load_exp_config()
