@@ -136,9 +136,13 @@ class JointC2FRewardManager(RewardManagerBase):
 
         # Save model weights (safetensors via HF). Treat this as the primary
         # artifact — if it fails we abandon the whole step.
+        # Catch broadly: safetensors raises its own SafetensorError on disk
+        # quota / I/O failures, and torch raises RuntimeError on
+        # serialization corruption. Either way we want to keep training, not
+        # crash the whole RL run on a checkpoint failure.
         try:
             self.components.c2f_model.save_pretrained(str(save_path))
-        except (OSError, RuntimeError) as e:
+        except Exception as e:
             log.warning(
                 "model save failed at %s: %r. Cleaning up partial save and continuing.",
                 save_path,
@@ -159,7 +163,7 @@ class JointC2FRewardManager(RewardManagerBase):
                 opt_path,
                 _use_new_zipfile_serialization=False,
             )
-        except (OSError, RuntimeError) as e:
+        except Exception as e:
             log.warning(
                 "optimizer save failed at %s: %r. Keeping model weights, "
                 "optimizer will be reinitialised on resume.",
