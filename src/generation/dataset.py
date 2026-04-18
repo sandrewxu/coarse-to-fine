@@ -1,7 +1,9 @@
 """
 Data utilities for step 5 (local latent generation).
 
-Loading prompts, saving outputs, verification, and C2F flattening.
+Loading prompts, saving outputs, verification, and C2F flattening. Also
+provides ``build_rl_parquet`` (used by the RL phase orchestration in step 7
+to convert the RL-split JSONL into veRL's expected parquet schema).
 """
 
 import json
@@ -11,8 +13,11 @@ from typing import Any
 
 from datasets import Dataset, load_dataset
 
+from src.common.logging import get_logger
 from src.data.schemas import VerificationStats
 from src.verification import verify
+
+log = get_logger(__name__)
 
 
 def load_prompts(parquet_path: str | Path) -> list[str]:
@@ -163,3 +168,70 @@ def flatten_for_c2f(
     path = output_dir / filename
     ds.to_parquet(str(path))
     return path
+
+
+def build_rl_parquet(
+    config: dict[str, Any],
+    project_root: Path,
+    *,
+    rl_section: str = "sft_rl",
+) -> Path:
+    """Build the RL training parquet from the RL-split JSONL.
+
+    Reads raw documents from ``dataset.rl_split`` and creates a veRL-compatible
+    parquet with three columns:
+
+    - ``prompt``: the raw document text wrapped as a chat message (input to
+      ``q_φ`` during rollout).
+    - ``ground_truth``: copy of the document (used by the reward manager to run
+      the C2F forward pass).
+    - ``data_source``: literal ``"latent_generation"``.
+
+    Args:
+        config: Full experiment config.
+        project_root: Repo root, used to resolve relative paths in the config.
+        rl_section: Which RL subsection holds the dataset_dir (``"sft_rl"`` or
+            ``"joint"``).
+
+    Returns:
+        Path to the written parquet. If a parquet already exists at the target
+        path, it is kept and returned as-is (idempotent).
+    """
+    rl_cfg = config["rl"][rl_section]
+
+    rl_dataset_dir = Path(rl_cfg.get("dataset_dir", "data/rl_dataset"))
+    if not rl_dataset_dir.is_absolute():
+        rl_dataset_dir = project_root / rl_dataset_dir
+    rl_dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    rl_parquet = rl_dataset_dir / "sft_rl.parquet"
+    if rl_parquet.exists():
+        log.info("RL parquet already exists: %s", rl_parquet)
+        return rl_parquet
+
+    dataset_cfg = config.get("dataset", {})
+    data_dir = Path(dataset_cfg.get("data_dir", "data/tinystoriesv2_shuffled"))
+    if not data_dir.is_absolute():
+        data_dir = project_root / data_dir
+    rl_split_file = data_dir / dataset_cfg.get("rl_split", "tinystoriesv2.rl.jsonl")
+
+    if not rl_split_file.exists():
+        raise FileNotFoundError(
+            f"RL split not found: {rl_split_file}\nRun step 0 (00_prepare_data.py) first."
+        )
+
+    log.info("Preparing RL parquet from %s ...", rl_split_file)
+    docs = load_documents_from_jsonl([rl_split_file])
+
+    records = [
+        {
+            "prompt": [{"role": "user", "content": doc}],
+            "ground_truth": doc,
+            "data_source": "latent_generation",
+        }
+        for doc in docs
+    ]
+    ds = Dataset.from_list(records)
+    ds.to_parquet(str(rl_parquet))
+    log.info("Saved RL parquet: %s (%d samples)", rl_parquet, len(ds))
+    return rl_parquet
