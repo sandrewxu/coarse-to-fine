@@ -105,7 +105,7 @@ def build_verl_grpo_overrides(
         # config schema (see verl/trainer/ppo/reward.py:load_reward_manager).
         "++reward.reward_manager.source=importlib",
         "++reward.reward_manager.name=C2FRewardManager",
-        f"++reward.reward_manager.module.path={project_root / 'src' / 'rl' / 'reward.py'}",
+        f"++reward.reward_manager.module.path={project_root / 'src' / 'rl' / 'reward_sft.py'}",
     ]
 
     total_epochs = rl_sft_config.get("epochs")
@@ -208,7 +208,7 @@ def build_verl_joint_overrides(
         "++reward.num_workers=1",
         "++reward.reward_manager.source=importlib",
         "++reward.reward_manager.name=JointC2FRewardManager",
-        f"++reward.reward_manager.module.path={project_root / 'src' / 'rl' / 'reward.py'}",
+        f"++reward.reward_manager.module.path={project_root / 'src' / 'rl' / 'reward_joint.py'}",
     ]
 
     total_epochs = rl_joint_config.get("epochs")

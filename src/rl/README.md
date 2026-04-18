@@ -21,9 +21,11 @@ Phase B is pure HuggingFace Trainer + FSDP.
 
 | File | Purpose |
 |---|---|
-| `reward.py` | `C2FRewardManager` (Phase A) and `JointC2FRewardManager` (Joint). Called by veRL during rollout scoring. **High-value refactor target** — the two classes share ~200 lines of helper code that will be lifted into `common.py` in a later phase. |
+| `common.py` | Shared helpers — `parse_layers`, `build_c2f_input`, `load_c2f_components`, the `C2FRewardComponents` dataclass, weight loader. Pure functions; importable from notebooks and tests. |
+| `reward_sft.py` | `C2FRewardManager` (Phase A). Called by veRL during rollout scoring. |
+| `reward_joint.py` | `JointC2FRewardManager` (joint phase). Owns the trainable C2F model + AdamW + per-worker checkpoint dir + asyncio lock for serialised updates. |
 | `train.py` | Phase orchestration (`run_sft_rl`, `run_c2f_finetune`, `run_joint`) and `apply_overrides` for CLI key=value flags. |
-| `verl_config.py` | Builds Hydra-style config overrides from the experiment YAML for invoking the veRL trainer subprocess. |
+| `verl_config.py` | Builds Hydra-style config overrides from the experiment YAML for invoking the veRL trainer subprocess. The `module.path` for each reward manager points at `reward_sft.py` / `reward_joint.py`. |
 
 ## The `C2F_CONFIG_PATH` contract
 
@@ -43,7 +45,7 @@ not found" error from a reward manager, check that this env var is set.
 
 The reward managers inherit from
 `verl.experimental.reward_loop.reward_manager.base.RewardManagerBase`. If veRL
-moves or renames that class, the imports in `reward.py:30` will break loudly —
-that's the canary. `pyproject.toml` pins `verl>=0.7.0` from PyPI; bump
-deliberately and re-run the integration smoke (`scripts/slurm_07_rl.sh` with
-`trainer.total_epochs=1`) when upgrading.
+moves or renames that class, the imports at the top of `reward_sft.py` and
+`reward_joint.py` will break loudly — that's the canary. `pyproject.toml` pins
+`verl>=0.7.0` from PyPI; bump deliberately and re-run the integration smoke
+(`scripts/slurm_07_rl.sh` with `trainer.total_epochs=1`) when upgrading.

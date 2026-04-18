@@ -246,7 +246,7 @@ def eval_c2f(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]
     """ELBO (IWAE-1) on the joint ``p_θ(x, z)`` with gold ``z`` from the parquet."""
     from src.qwen3_joint.configuration import C2FConfig
     from src.qwen3_joint.modeling import C2FForCausalLM
-    from src.rl.reward import _load_c2f_weights
+    from src.rl.common import load_c2f_weights
 
     if args.K != 1:
         raise NotImplementedError(
@@ -262,7 +262,7 @@ def eval_c2f(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]
     log.info(f"Loading C2F model from {args.ckpt}...")
     model_config = C2FConfig.from_pretrained(str(args.ckpt))
     model = C2FForCausalLM(model_config)
-    model = _load_c2f_weights(model, args.ckpt)
+    model = load_c2f_weights(model, args.ckpt)
     model.to(device)
     model.eval()
     _check_vocab_consistency(model.config.vocab_size, tokenizer.vocab_size)

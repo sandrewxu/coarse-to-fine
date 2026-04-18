@@ -65,7 +65,7 @@ sbatch scripts/slurm_0N_*.sh
 - **veRL workers don't inherit the parent env reliably.** The experiment YAML is
   re-located inside the worker via the `C2F_CONFIG_PATH` env var (set by the
   SLURM/launch script before `torchrun`). If you see "config not found" errors in
-  reward managers, check that env var.
+  reward managers, check that env var. The lookup helper is `src.rl.common.load_exp_config`.
 - **Two attention modes coexist:** `mask_type="block"` (default, C2F semantics)
   and `mask_type="causal"` (AR baseline). Step 8 and 9 evaluators handle both —
   if you change the model, both code paths must keep working.
@@ -83,7 +83,7 @@ sbatch scripts/slurm_0N_*.sh
 |---|---|
 | New pipeline step | numbered `scripts/NN_*.py` + matching `slurm_NN_*.sh` + new section in `README.md` "Running the Pipeline" + new Pydantic section in `src/config.py` |
 | New dataset | register in `src/data/registry.py` + add a preprocess fn in `src/data/preprocessing.py` |
-| New RL reward shaping | edit `src/rl/reward.py`; the active reward manager is selected by phase dispatch in `scripts/07_rl_train.py` (`--phase {sft,c2f,joint,both}`) |
+| New RL reward shaping | edit `src/rl/reward_sft.py` (Phase A) or `src/rl/reward_joint.py` (joint); shared helpers live in `src/rl/common.py`. Phase dispatch is in `scripts/07_rl_train.py` (`--phase {sft,c2f,joint,both}`). |
 | New attention variant | edit `src/qwen3_joint/modeling.py`, add a `create_*_mask` function, gate via `C2FConfig.mask_type`, mark every change with `# C2F:` |
 | New batch-API prompt | drop a file under `prompts/{system_prompts,user_prompts,few_shot_examples}/` and reference it by filename in `config.batch` |
 
