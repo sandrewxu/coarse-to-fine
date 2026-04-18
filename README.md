@@ -311,7 +311,7 @@ Each pipeline step has its own optional dependency group to avoid unnecessary in
 pip install -e ".[sft]"        # Step 4 — veRL (used only in step 7A GRPO)
 pip install -e ".[generation]" # Step 5 — vLLM generation
 pip install -e ".[c2f]"        # Step 6 — C2F pretraining
-pip install -e ".[dev]"        # Ruff, pytest, pre-commit, nbstripout
+pip install -e ".[dev]"        # Ruff, pytest, pre-commit, nbstripout, CPU torch (for unit tests)
 ```
 
 For **contributor setup** (lint/format hooks):

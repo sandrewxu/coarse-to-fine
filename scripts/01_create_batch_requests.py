@@ -24,9 +24,6 @@ import random
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
 from src.batch.requests import (
     create_batch_requests,
     load_documents,
@@ -34,6 +31,7 @@ from src.batch.requests import (
     save_batch_requests,
 )
 from src.common.logging import get_logger
+from src.common.paths import PROJECT_ROOT
 from src.config import load_config
 
 log = get_logger(__name__)

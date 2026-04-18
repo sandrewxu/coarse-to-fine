@@ -17,11 +17,9 @@ import argparse
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
 from src.common.env import load_env, setup_wandb
 from src.common.logging import get_logger
+from src.common.paths import PROJECT_ROOT
 from src.config import load_config
 from src.sft.train import train_sft
 

@@ -42,7 +42,9 @@ class C2FConfig(Qwen3Config):
     ) -> None:
         # C2F: default scale layout matching the plan: 4 latent scales + text.
         if scale_lengths is None:
-            scale_lengths = [2, 4, 8, 16, 32]
+            from src.common.constants import DEFAULT_SCALE_LENGTHS
+
+            scale_lengths = list(DEFAULT_SCALE_LENGTHS)
         self.scale_lengths = scale_lengths
 
         if mask_type not in ("block", "causal"):

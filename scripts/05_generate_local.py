@@ -31,8 +31,7 @@ from src.common.logging import get_logger
 
 log = get_logger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+from src.common.paths import PROJECT_ROOT
 
 
 def main() -> int:
@@ -110,7 +109,7 @@ def main() -> int:
             return 1
         from src.generation.dataset import load_prompts
 
-        log.error(f"Loading prompts from {args.data}...")
+        log.info(f"Loading prompts from {args.data}...")
         prompts = load_prompts(args.data)
     else:
         # Load from chunk files
@@ -130,7 +129,7 @@ def main() -> int:
                 log.error(f"Chunk file not found: {p}")
                 return 1
 
-        log.error(f"Loading documents from {len(chunk_paths)} chunks: {chunk_indices}...")
+        log.info(f"Loading documents from {len(chunk_paths)} chunks: {chunk_indices}...")
         prompts = load_documents_from_jsonl(chunk_paths)
 
     if args.num_samples and args.num_samples < len(prompts):

@@ -28,13 +28,11 @@ import json
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
 from src.batch.client import create_client
 from src.batch.submit import download_completed, monitor_all, monitor_batch, submit_batch
 from src.common.env import load_env
 from src.common.logging import get_logger
+from src.common.paths import PROJECT_ROOT
 from src.config import load_config
 
 log = get_logger(__name__)
@@ -120,7 +118,7 @@ def main():
     batch_id = submit_batch(client, args.input, metadata=metadata)
 
     if args.monitor:
-        log.error(f"\nMonitoring batch {batch_id}...")
+        log.info(f"Monitoring batch {batch_id}...")
         result = monitor_batch(client, batch_id, output_dir, poll_interval=args.poll_interval)
         if result:
             log.info(f"\nOutput saved to: {result}")

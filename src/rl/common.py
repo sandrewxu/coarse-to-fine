@@ -18,15 +18,18 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from src.c2f_model.configuration import C2FConfig
-from src.c2f_model.modeling import C2FForCausalLM
-from src.c2f_model.training.tokenizer import load_or_train_space_tokenizer
 from src.common.logging import get_logger
 from src.verification import verify as verify_layers
+
+if TYPE_CHECKING:
+    # Heavy imports needed only by the load_c2f_* factories. Importing them
+    # lazily lets ``src.rl.common`` be used from notebooks / unit tests
+    # (test_reward_common.py) without pulling in transformers / huggingface.
+    from src.c2f_model.modeling import C2FForCausalLM
 
 log = get_logger(__name__)
 
@@ -142,7 +145,7 @@ def build_c2f_input(
     return input_ids, labels
 
 
-def load_c2f_weights(model: C2FForCausalLM, checkpoint_path: Path) -> C2FForCausalLM:
+def load_c2f_weights(model: "C2FForCausalLM", checkpoint_path: Path) -> "C2FForCausalLM":
     """Load weights from a saved checkpoint (safetensors or pytorch_model.bin)."""
     sf_path = checkpoint_path / "model.safetensors"
     pt_path = checkpoint_path / "pytorch_model.bin"
@@ -179,7 +182,7 @@ class C2FRewardComponents:
     word_count_constraints: dict[str, int]
     text_word_count: int
     sft_tokenizer: Any
-    c2f_model: C2FForCausalLM
+    c2f_model: "C2FForCausalLM"
     space_tokenizer: Any
     strict_word_count: bool
     bos_id: int
@@ -218,6 +221,12 @@ def load_c2f_components(
         c2f_mask_type: if given, overrides ``mask_type`` on the loaded C2F
             config (joint phase uses ``"causal"``).
     """
+    # Lazy imports — these pull in transformers / huggingface and would block
+    # importing this module from notebooks or unit tests if hoisted to module level.
+    from src.c2f_model.configuration import C2FConfig
+    from src.c2f_model.modeling import C2FForCausalLM
+    from src.c2f_model.training.tokenizer import load_or_train_space_tokenizer
+
     rl_section = exp_config.get("rl", {}).get(c2f_section_key, {})
 
     # ── C2F model ────────────────────────────────────────────────────────────

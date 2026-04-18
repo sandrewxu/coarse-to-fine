@@ -197,7 +197,10 @@ class C2FTrainer(Trainer):
         self, *args, scale_lengths: list[int] | None = None, mask_type: str = "block", **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
-        scale_lengths = scale_lengths or [2, 4, 8, 16, 32]
+        if scale_lengths is None:
+            from src.common.constants import DEFAULT_SCALE_LENGTHS
+
+            scale_lengths = list(DEFAULT_SCALE_LENGTHS)
         self._mask_type = mask_type
         self._scale_names = SCALE_NAMES
         self._scale_ranges = _build_scale_ranges(scale_lengths)

@@ -15,8 +15,6 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from src.common.logging import get_logger
 from src.config import load_config
 from src.data.schemas import VerificationStats
@@ -129,7 +127,7 @@ def main():
         log.warning("No prompts file found; prompt column will be empty.")
 
     # Process and verify
-    log.error(f"Processing {args.input}...")
+    log.info(f"Processing {args.input}...")
     stats = VerificationStats()
     results: list[VerificationResult] = []
 
@@ -141,8 +139,10 @@ def main():
 
             try:
                 custom_id, content, error = extract_openai_batch_line(line)
-            except Exception as e:
-                log.warning(f"Failed to parse line {line_num}: {e}")
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                # JSONDecodeError: malformed JSON line; KeyError/TypeError: missing
+                # or wrong-typed fields. Anything else (OOM, FS) should propagate.
+                log.warning("Failed to parse line %d: %s", line_num, e)
                 continue
 
             stats.total_processed += 1

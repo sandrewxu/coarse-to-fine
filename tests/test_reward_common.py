@@ -5,11 +5,6 @@ and ``strip_think``. No CUDA, no veRL — these run in CI on a clean Python
 install with just ``torch`` and ``pydantic``.
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import pytest
 import torch
 

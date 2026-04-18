@@ -1,10 +1,5 @@
 """Tests for space-based verification logic."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from src.verification import verify
 
 CONSTRAINTS = {"z_4": 2, "z_3": 4, "z_2": 8, "z_1": 16}

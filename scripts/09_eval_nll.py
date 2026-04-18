@@ -40,10 +40,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
 from src.common.logging import get_logger
+from src.common.paths import PROJECT_ROOT
 from src.eval import eval_ar, eval_c2f, eval_diffusion
 from src.eval.common import save_per_doc
 
