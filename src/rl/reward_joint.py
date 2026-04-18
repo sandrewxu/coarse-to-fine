@@ -130,19 +130,45 @@ class JointC2FRewardManager(RewardManagerBase):
         save_path = self._save_dir / f"step_{self._step}"
         try:
             save_path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.warning("checkpoint dir create failed at %s: %r", save_path, e)
+            return
+
+        # Save model weights (safetensors via HF). Treat this as the primary
+        # artifact — if it fails we abandon the whole step.
+        try:
             self.components.c2f_model.save_pretrained(str(save_path))
-            torch.save(self.optimizer.state_dict(), save_path / "optimizer.pt")
-            log.info("Saved p checkpoint: %s", save_path)
         except (OSError, RuntimeError) as e:
-            # OSError: disk full / permissions; RuntimeError: torch save / FSDP
-            # gather failure. Anything else is unexpected and should propagate.
             log.warning(
-                "checkpoint save failed at %s: %r. Cleaning up partial save and continuing.",
+                "model save failed at %s: %r. Cleaning up partial save and continuing.",
                 save_path,
                 e,
             )
             shutil.rmtree(save_path, ignore_errors=True)
             return
+
+        # Save optimizer state separately. Use legacy (non-zip) serialization
+        # to dodge a torch>=2.9 zip-container bug that fires on Adam states
+        # after the moments are populated. If this still fails, log and keep
+        # the model weights — optimizer state is recoverable from the saved
+        # weights (with a warm restart cost).
+        opt_path = save_path / "optimizer.pt"
+        try:
+            torch.save(
+                self.optimizer.state_dict(),
+                opt_path,
+                _use_new_zipfile_serialization=False,
+            )
+        except (OSError, RuntimeError) as e:
+            log.warning(
+                "optimizer save failed at %s: %r. Keeping model weights, "
+                "optimizer will be reinitialised on resume.",
+                opt_path,
+                e,
+            )
+            opt_path.unlink(missing_ok=True)
+
+        log.info("Saved p checkpoint: %s", save_path)
 
         # Prune older checkpoints, keep last N.
         step_dirs = sorted(
