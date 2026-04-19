@@ -242,10 +242,15 @@ def build_rl_parquet(
     log.info("Preparing %s parquet from %s ...", split, split_file)
     docs = load_documents_from_jsonl([split_file])
 
+    # ``reward_model.ground_truth`` is the shape veRL's NaiveRewardManager
+    # (and other built-in managers) expect; our C2F managers fall back to the
+    # flat ``ground_truth`` key. Write both so the parquet works regardless of
+    # which reward manager ends up loaded.
     records = [
         {
             "prompt": [{"role": "user", "content": doc}],
             "ground_truth": doc,
+            "reward_model": {"ground_truth": doc},
             "data_source": "latent_generation",
             "is_validation": is_validation,
         }

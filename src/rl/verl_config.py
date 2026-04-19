@@ -113,12 +113,17 @@ def build_verl_grpo_overrides(
         f"++actor_rollout_ref.actor.ppo_mini_batch_size={rl_sft_config.get('train_batch_size', 64)}",
         f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
         f"++actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
-        # ── Custom reward manager (full class, loaded via importlib) ─────────
-        # Lives under `reward.reward_manager.*` in the experimental reward_loop
-        # config schema (see verl/trainer/ppo/reward.py:load_reward_manager).
-        "++reward.reward_manager.source=importlib",
-        "++reward.reward_manager.name=C2FRewardManager",
-        f"++reward.reward_manager.module.path={project_root / 'src' / 'rl' / 'reward_sft.py'}",
+        # ── Custom reward manager (experimental reward_loop schema) ──────────
+        # veRL 0.7 has two parallel systems: legacy trainer/ppo/reward.py reads
+        # `reward.reward_manager.*`; the agent_loop path (what rollouts actually
+        # hit) reads `reward_model.*` via verl/experimental/reward_loop/reward_loop.py.
+        # If these keys aren't set correctly the loader silently falls back to
+        # NaiveRewardManager (which expects a different parquet schema and crashes).
+        "++reward_model.enable=false",
+        "++reward_model.num_workers=1",
+        "++reward_model.reward_loop_source=import",
+        "++reward_model.reward_loop_class_name=C2FRewardManager",
+        f"++reward_model.reward_loop_module_path={project_root / 'src' / 'rl' / 'reward_sft.py'}",
     ]
 
     total_epochs = rl_sft_config.get("epochs")
@@ -224,18 +229,21 @@ def build_verl_joint_overrides(
         f"++actor_rollout_ref.actor.ppo_mini_batch_size={rl_joint_config.get('train_batch_size', 256)}",
         f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
         f"++actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
-        # ── Reward model (disabled, but config must be valid) ────────────────
-        "++reward.reward_model.enable=false",
-        f"++reward.reward_model.rollout.tensor_model_parallel_size={num_gpus}",
-        # ── Joint reward manager (trains p per-sample inside run_single) ────
-        # Lives under `reward.reward_manager.*` (experimental reward_loop schema).
+        # ── Reward manager (experimental reward_loop schema) ─────────────────
+        # veRL 0.7 has two parallel systems: legacy trainer/ppo/reward.py reads
+        # `reward.reward_manager.*`; the agent_loop path (what rollouts actually
+        # hit) reads `reward_model.*` via verl/experimental/reward_loop/reward_loop.py.
+        # If these keys aren't set correctly the loader silently falls back to
+        # NaiveRewardManager (which expects a different parquet schema and crashes).
+        #
         # num_workers=1 so a single p_θ is shared across all rollouts — required
         # for correct joint ELBO updates (otherwise each RewardLoopWorker trains
         # an independent copy of p_θ and q_φ's REINFORCE sees biased rewards).
-        "++reward.num_workers=1",
-        "++reward.reward_manager.source=importlib",
-        "++reward.reward_manager.name=JointC2FRewardManager",
-        f"++reward.reward_manager.module.path={project_root / 'src' / 'rl' / 'reward_joint.py'}",
+        "++reward_model.enable=false",
+        "++reward_model.num_workers=1",
+        "++reward_model.reward_loop_source=import",
+        "++reward_model.reward_loop_class_name=JointC2FRewardManager",
+        f"++reward_model.reward_loop_module_path={project_root / 'src' / 'rl' / 'reward_joint.py'}",
     ]
 
     total_epochs = rl_joint_config.get("epochs")
