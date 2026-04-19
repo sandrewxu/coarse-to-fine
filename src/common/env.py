@@ -131,4 +131,22 @@ def setup_wandb(config: dict[str, Any], step_name: str | None = None) -> bool:
         run_name = f"{step_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         os.environ["WANDB_NAME"] = run_name
 
+    # Register a pre-atexit handler that calls wandb.finish() synchronously,
+    # so wandb's own async teardown_atexit finds nothing to do. Fixes the
+    # harmless-but-noisy BrokenPipeError we see at the end of every run
+    # caused by Ray closing the wandb-service socket before wandb's async
+    # teardown runs. LIFO atexit ordering ensures ours fires first.
+    import atexit
+
+    def _finish_wandb_early() -> None:
+        try:
+            import wandb
+
+            if wandb.run is not None:
+                wandb.finish()
+        except Exception:
+            pass
+
+    atexit.register(_finish_wandb_early)
+
     return True
