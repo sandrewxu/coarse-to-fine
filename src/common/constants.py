@@ -6,10 +6,12 @@ hyperparameters belong in ``config/latent_generation.yaml`` and the matching
 Pydantic schema in ``src/config.py``.
 """
 
-# vLLM memory budget — matches SFT max_length(256) + max_response(256) × 2 with
-# headroom; >1024 over-allocates KV cache for Qwen3-4B in bf16 on a single H100.
-VLLM_MAX_MODEL_LEN: int = 1024
-VLLM_MAX_NUM_SEQS: int = 1024
+# vLLM memory budget — matches SFT max_length(256) + max_response(256) = 512.
+# Qwen3-4B's native max_position_embeddings is 40960; leaving max_model_len
+# unset makes vLLM reserve KV cache for that full context, which silently
+# OOMs a single H100 (even 141 GiB) when colocated with an FSDP actor.
+VLLM_MAX_MODEL_LEN: int = 512
+VLLM_MAX_NUM_SEQS: int = 64
 
 # Canonical scale layout used across the codebase. Override per-experiment via
 # `scale_lengths` in the config YAML.

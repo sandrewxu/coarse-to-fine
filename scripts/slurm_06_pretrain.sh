@@ -31,14 +31,15 @@ if [ -d ".venv" ]; then
 fi
 
 NUM_GPUS=${NUM_GPUS:-1}
+CONFIG=${CONFIG:-config/latent_generation.yaml}
 
 if [ "$NUM_GPUS" -gt 1 ]; then
   accelerate launch --num_processes="$NUM_GPUS" \
     scripts/06_train_decoder.py \
     --data data/local_generations/c2f_train.parquet \
-    --config config/latent_generation.yaml
+    --config "$CONFIG"
 else
   python scripts/06_train_decoder.py \
     --data data/local_generations/c2f_train.parquet \
-    --config config/latent_generation.yaml
+    --config "$CONFIG"
 fi

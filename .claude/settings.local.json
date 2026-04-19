@@ -32,7 +32,17 @@
       "Bash(awk '/^[[:space:]]*def /{fname=$2; line=NR} /^[[:space:]]*def /&&NR>1{if\\(NR-line>50\\)print FILENAME\":\"fname\" \\(\"\\(NR-line\\)\" lines\\)\"}' /Users/andrewxu/Developer/coarse-to-fine/src/**/*.py)",
       "Bash(sort -t: -k3 -rn)",
       "Bash(git check-ignore *)",
-      "Bash(bash -n scripts/slurm_07_rl.sh)"
+      "Bash(bash -n scripts/slurm_07_rl.sh)",
+      "WebFetch(domain:hub.docker.com)",
+      "WebFetch(domain:www.runpod.io)",
+      "Bash(curl -s \"https://api.github.com/search/issues?q=repo:vllm-project/vllm+AttributeError+NoneType+future+result+engine+core\")",
+      "Bash(curl -s \"https://api.github.com/search/issues?q=repo:vllm-project/vllm+%22future.result%22+NoneType\")",
+      "Bash(curl -s \"https://api.github.com/repos/vllm-project/vllm/pulls/31611\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/vllm-project/vllm/v0.11.0/vllm/v1/engine/core.py\" -o /tmp/core_0110.py)",
+      "Read(//tmp/**)",
+      "Bash(curl -s \"https://api.github.com/search/issues?q=repo:vllm-project/vllm+%22engine%2Fcore.py%22+%22line+342%22\")",
+      "Bash(curl -s \"https://api.github.com/search/issues?q=repo:volcengine/verl+vllm+%22future.result%22\")",
+      "Bash(gh issue *)"
     ]
   }
 }

@@ -172,6 +172,10 @@ def train_sft(
         num_gpus,
     )
     trainer.train(resume_from_checkpoint=resume_from)
+    # Cap max_position_embeddings on the saved config so downstream consumers
+    # (vLLM rollout in step 7, HF generation in step 5) don't inherit
+    # Qwen3-4B's 40960 default and over-reserve KV cache.
+    model.config.max_position_embeddings = max_length
     trainer.save_model()
     tokenizer.save_pretrained(str(checkpoint_dir))
     log.info("Model saved to: %s", checkpoint_dir)

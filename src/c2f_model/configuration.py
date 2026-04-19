@@ -56,6 +56,12 @@ class C2FConfig(Qwen3Config):
         # uses its own causal kernel, breaking the C2F attention pattern.
         # Force eager attention so the mask is always applied correctly.
         kwargs.setdefault("attn_implementation", "eager")
+        # C2F: cap max_position_embeddings to our scale budget. C2F uses
+        # C2FScaleEmbedding (no RoPE), so this field is metadata only — but
+        # inheritors (HF Trainer, vLLM) read it and over-allocate if left at
+        # Qwen3-4B's 40960 default.
+        total = 1 + sum(scale_lengths)
+        kwargs.setdefault("max_position_embeddings", 2 ** math.ceil(math.log2(total)))
         super().__init__(**kwargs)
 
     # C2F: derived properties so callers never have to recompute these.

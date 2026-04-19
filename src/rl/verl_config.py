@@ -80,6 +80,9 @@ def build_verl_grpo_overrides(
         f"++data.max_prompt_length={rl_sft_config.get('max_prompt_length', 256)}",
         f"++data.max_response_length={rl_sft_config.get('max_response_length', 256)}",
         f"++data.train_batch_size={rl_sft_config.get('train_batch_size', 64)}",
+        # Validation batch defaults to len(val_dataset) (ray_trainer.py:366-368),
+        # which ships the entire val split in one generate_sequences call. Cap.
+        f"++data.val_batch_size={rl_sft_config.get('val_batch_size', 64)}",
         f"++data.dataloader_num_workers={rl_sft_config.get('dataloader_num_workers', 4)}",
         # ── Algorithm: GRPO ──────────────────────────────────────────────────
         "++algorithm.adv_estimator=grpo",
@@ -89,6 +92,16 @@ def build_verl_grpo_overrides(
         f"++actor_rollout_ref.rollout.n={rl_sft_config.get('rollout_n', 8)}",
         f"++actor_rollout_ref.rollout.temperature={rl_sft_config.get('temperature', 1.0)}",
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
+        # vLLM rollout KV-cache budget. Qwen3-4B's native max_position_embeddings
+        # is 40960 — leaving these unset OOMs a single H100 colocated with FSDP
+        # actor + ref + reward models. Prompt+response = 512 by default, so
+        # max_model_len=512 is exact; gpu_memory_utilization=0.3 reserves ~42
+        # GiB on a 141GiB H100, leaving room for the ~83 GiB the actor/ref/reward
+        # already hold at engine init. Tune per-experiment via rl.<section>.*.
+        f"++actor_rollout_ref.rollout.max_model_len={rl_sft_config.get('max_prompt_length', 256) + rl_sft_config.get('max_response_length', 256)}",
+        f"++actor_rollout_ref.rollout.max_num_seqs={rl_sft_config.get('rollout_max_num_seqs', 64)}",
+        f"++actor_rollout_ref.rollout.max_num_batched_tokens={rl_sft_config.get('rollout_max_num_batched_tokens', 4096)}",
+        f"++actor_rollout_ref.rollout.gpu_memory_utilization={rl_sft_config.get('rollout_gpu_memory_utilization', 0.3)}",
         "++actor_rollout_ref.actor.use_kl_loss=true",
         f"++actor_rollout_ref.actor.kl_loss_coef={rl_sft_config.get('kl_coef', 0.01)}",
         # Nonzero entropy_coeff enables `actor/entropy` in W&B (ray_trainer.py:1221
@@ -178,6 +191,9 @@ def build_verl_joint_overrides(
         f"++data.max_prompt_length={rl_joint_config.get('max_prompt_length', 256)}",
         f"++data.max_response_length={rl_joint_config.get('max_response_length', 256)}",
         f"++data.train_batch_size={rl_joint_config.get('train_batch_size', 256)}",
+        # Validation batch defaults to len(val_dataset) (ray_trainer.py:366-368),
+        # which ships the entire val split in one generate_sequences call. Cap.
+        f"++data.val_batch_size={rl_joint_config.get('val_batch_size', 64)}",
         f"++data.dataloader_num_workers={rl_joint_config.get('dataloader_num_workers', 4)}",
         # ── Algorithm: REINFORCE++ (no critic, no KL) ───────────────────────
         "++algorithm.adv_estimator=reinforce_plus_plus",
@@ -189,6 +205,16 @@ def build_verl_joint_overrides(
         "++actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
         f"++actor_rollout_ref.rollout.temperature={rl_joint_config.get('temperature', 1.0)}",
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",
+        # vLLM rollout KV-cache budget. Qwen3-4B's native max_position_embeddings
+        # is 40960 — leaving these unset OOMs a single H100 colocated with FSDP
+        # actor + ref + JointC2FRewardManager p_θ. Prompt+response = 512 by
+        # default, so max_model_len=512 is exact; gpu_memory_utilization=0.3
+        # reserves ~42 GiB on a 141GiB H100, leaving room for the ~83 GiB the
+        # actor/ref/reward already hold at engine init. Tune via rl.joint.*.
+        f"++actor_rollout_ref.rollout.max_model_len={rl_joint_config.get('max_prompt_length', 256) + rl_joint_config.get('max_response_length', 256)}",
+        f"++actor_rollout_ref.rollout.max_num_seqs={rl_joint_config.get('rollout_max_num_seqs', 64)}",
+        f"++actor_rollout_ref.rollout.max_num_batched_tokens={rl_joint_config.get('rollout_max_num_batched_tokens', 4096)}",
+        f"++actor_rollout_ref.rollout.gpu_memory_utilization={rl_joint_config.get('rollout_gpu_memory_utilization', 0.3)}",
         "++actor_rollout_ref.actor.use_kl_loss=false",
         # Enable `actor/entropy` logging so posterior-collapse demonstrations can
         # show q_φ entropy decaying alongside p_loss going down. 1e-8 is

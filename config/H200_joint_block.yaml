@@ -1,0 +1,47 @@
+# H200 (141 GB) — step 6 block decoder, step 7 joint RL with block mask.
+scale_lengths: [2, 4, 8, 16, 32]
+
+wandb:
+  group: "latent-generation"
+  tags: ["qwen3-4b", "h200", "block"]
+
+dataset:
+  data_dir: "data/tinystoriesv2_shuffled"
+  dataset_name: "tinystoriesv2"
+
+sft:
+  prompt_data: "data/prompt_data/gpt-5-nano-2025-08-07/docs_0000100000/gemini-3-pro-7/latent-generation/sft.jsonl"
+
+generation:
+  model_path: "checkpoints/sft/checkpoint-1172"
+  chunks: [0]
+
+rl:
+  sft_rl:
+    model_path: "checkpoints/sft/checkpoint-1172"
+  c2f_finetune:
+    model_path: "checkpoints/decoder_block"
+  joint:
+    model_path: "checkpoints/sft/checkpoint-1172"
+    c2f_model_path: "checkpoints/decoder_block"
+    c2f_mask_type: "block"
+    c2f_lr: 1.0e-4
+    checkpoint_dir: "checkpoints/rl/joint_block"
+    c2f_save_dir: "checkpoints/rl/joint_block/c2f"
+    train_batch_size: 256
+    ppo_micro_batch_size_per_gpu: 48
+    c2f_micro_batch_size: 256
+
+num_gpus: 1
+
+c2f_training:
+  fsdp: ""
+  hidden_size: 512
+  intermediate_size: 2048
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  num_hidden_layers: 8
+  mask_type: "block"
+  checkpoint_dir: "checkpoints/decoder_block"
+  per_device_batch_size: 512
