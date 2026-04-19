@@ -121,4 +121,14 @@ def setup_wandb(config: dict[str, Any], step_name: str | None = None) -> bool:
     # Log the full experiment config as W&B config metadata
     os.environ.setdefault("WANDB_DIR", str(PROJECT_ROOT / "wandb"))
 
+    # Build a timestamped run name so every launch gets a unique, sortable label.
+    # WANDB_NAME is the one env var both HF Trainer and veRL respect when set
+    # before wandb.init(), so callers don't need to thread a name through
+    # TrainingArguments or ++trainer.experiment_name by hand.
+    if step_name:
+        from datetime import datetime
+
+        run_name = f"{step_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        os.environ["WANDB_NAME"] = run_name
+
     return True

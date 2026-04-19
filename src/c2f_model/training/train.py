@@ -6,6 +6,7 @@ weight transfer for compatible parameters, TrainingArguments construction
 from the experiment YAML config, and per-scale loss logging via W&B.
 """
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -161,7 +162,7 @@ def build_training_args(
         fsdp=c2f.get("fsdp", ""),
         fsdp_config=c2f.get("fsdp_config", {}),
         report_to=report_to,
-        run_name=c2f.get("run_name", "c2f-pretrain"),
+        run_name=os.environ.get("WANDB_NAME") or c2f.get("run_name", "c2f-pretrain"),
         seed=c2f.get("seed", 42),
         bf16=torch.cuda.is_available(),
         dataloader_num_workers=4,

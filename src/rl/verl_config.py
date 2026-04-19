@@ -135,6 +135,11 @@ def build_verl_grpo_overrides(
         overrides.append("++trainer.logger=['console','wandb']")
         project = os.environ.get("WANDB_PROJECT", "coarse-to-fine")
         overrides.append(f"++trainer.project_name={project}")
+        # Propagate the timestamped run name (set by setup_wandb) into veRL,
+        # otherwise its W&B logger invents its own (the infamous "gsm8k").
+        wandb_run_name = os.environ.get("WANDB_NAME", "")
+        if wandb_run_name:
+            overrides.append(f"++trainer.experiment_name={wandb_run_name}")
     else:
         overrides.append("++trainer.logger=['console']")
 
@@ -254,6 +259,11 @@ def build_verl_joint_overrides(
         overrides.append("++trainer.logger=['console','wandb']")
         project = os.environ.get("WANDB_PROJECT", "coarse-to-fine")
         overrides.append(f"++trainer.project_name={project}")
+        # Propagate the timestamped run name (set by setup_wandb) into veRL,
+        # otherwise its W&B logger invents its own (the infamous "gsm8k").
+        wandb_run_name = os.environ.get("WANDB_NAME", "")
+        if wandb_run_name:
+            overrides.append(f"++trainer.experiment_name={wandb_run_name}")
     else:
         overrides.append("++trainer.logger=['console']")
 

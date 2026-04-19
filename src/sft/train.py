@@ -12,6 +12,7 @@ Saves a standard HuggingFace checkpoint that vLLM and downstream steps can
 load directly.
 """
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -150,7 +151,7 @@ def train_sft(
         eval_strategy="epoch" if eval_ds is not None else "no",
         save_total_limit=3,
         report_to="wandb" if wandb_enabled else "none",
-        run_name="sft-qwen3-4b",
+        run_name=os.environ.get("WANDB_NAME") or "sft-qwen3-4b",
         gradient_checkpointing=True,
         seed=seed,
     )

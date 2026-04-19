@@ -108,7 +108,10 @@ def main() -> int:
 
         load_env()
         config = load_config(args.config)
-        wandb_enabled = setup_wandb(config, step_name="c2f-pretrain")
+        # Include mask_type ("block" / "causal") in the wandb run name so the
+        # two variants are easy to A/B in the dashboard.
+        mask_type = config.get("c2f_training", {}).get("mask_type", "block")
+        wandb_enabled = setup_wandb(config, step_name=f"c2f-pretrain-{mask_type}")
 
     c2f_cfg = config["c2f_training"]
 

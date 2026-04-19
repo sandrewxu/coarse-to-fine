@@ -67,7 +67,11 @@ def main() -> int:
 
     load_env()
     config = load_config(args.config)
-    wandb_enabled = setup_wandb(config, step_name=f"rl-{args.phase}")
+    # Include c2f_mask_type in the run tag (e.g. "rl-joint-causal") so
+    # wandb runs are sortable by phase × mask variant.
+    mask_type = config.get("rl", {}).get(args.phase, {}).get("c2f_mask_type", "")
+    step_tag = f"rl-{args.phase}" + (f"-{mask_type}" if mask_type else "")
+    wandb_enabled = setup_wandb(config, step_name=step_tag)
 
     # Apply dot-path overrides (rl.* → config, others → veRL pass-through)
     from src.rl.train import apply_overrides
