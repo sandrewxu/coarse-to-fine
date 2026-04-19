@@ -29,7 +29,7 @@ rl:
     checkpoint_dir: "checkpoints/rl/joint_block"
     c2f_save_dir: "checkpoints/rl/joint_block/c2f"
     train_batch_size: 256
-    ppo_micro_batch_size_per_gpu: 48
+    ppo_micro_batch_size_per_gpu: 64
     c2f_micro_batch_size: 256
 
 num_gpus: 1
@@ -44,4 +44,5 @@ c2f_training:
   num_hidden_layers: 8
   mask_type: "block"
   checkpoint_dir: "checkpoints/decoder_block"
+  tokenizer_dir: "checkpoints/decoder_block/tokenizer"
   per_device_batch_size: 512

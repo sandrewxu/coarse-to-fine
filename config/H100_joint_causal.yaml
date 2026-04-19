@@ -45,4 +45,5 @@ c2f_training:
   num_hidden_layers: 8
   mask_type: "causal"
   checkpoint_dir: "checkpoints/decoder_causal"
+  tokenizer_dir: "checkpoints/decoder_causal/tokenizer"
   per_device_batch_size: 256

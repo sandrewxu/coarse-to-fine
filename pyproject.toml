@@ -18,6 +18,7 @@ dependencies = [
     "liger-kernel>=0.7.0",
     "ninja>=1.13.0",
     "openai>=1.0",
+    "pre-commit>=4.5.1",
     "pyarrow>=23.0.1",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
@@ -29,7 +30,7 @@ dependencies = [
     "verl>=0.7.0",
     # Lower bound matches the working install on Yale HPC (cluster build of
     # vllm with FA2 / CUDA 12.8). Bump deliberately and rebuild.
-    "vllm>=0.11.0, <0.12.0",
+    "vllm==0.12.0",
     "wheel>=0.46.3",
 ]
 

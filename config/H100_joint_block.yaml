@@ -45,4 +45,5 @@ c2f_training:
   num_hidden_layers: 8
   mask_type: "block"
   checkpoint_dir: "checkpoints/decoder_block"
+  tokenizer_dir: "checkpoints/decoder_block/tokenizer"
   per_device_batch_size: 256

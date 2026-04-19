@@ -36,9 +36,12 @@ class JointC2FRewardManager(RewardManagerBase):
         config,
         tokenizer,
         compute_score=None,
+        reward_router_address=None,
+        reward_model_tokenizer=None,
         **kwargs,
     ) -> None:
-        super().__init__(config, tokenizer, compute_score)
+        super().__init__(config, tokenizer)
+        self.compute_score = compute_score
 
         exp_config = load_exp_config()
         joint_cfg = exp_config.get("rl", {}).get("joint", {})
@@ -298,9 +301,7 @@ class JointC2FRewardManager(RewardManagerBase):
         # instead (see src/generation/dataset.py:build_rl_parquet); meta_info is
         # a fallback for legacy parquets that lack the column.
         nt = data_item.non_tensor_batch
-        is_validate = bool(
-            nt.get("is_validation", data.meta_info.get("validate", False))
-        )
+        is_validate = bool(nt.get("is_validation", data.meta_info.get("validate", False)))
         response_ids = data_item.batch["responses"]
         response_str = c.sft_tokenizer.decode(response_ids.tolist(), skip_special_tokens=True)
 

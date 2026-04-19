@@ -180,7 +180,7 @@ class JointConfig(BaseModel):
     c2f_model_path: str = "checkpoints/decoder"
     c2f_lr: float = 1e-4
     c2f_weight_decay: float = 0.01
-    c2f_save_steps: int = 100
+    c2f_save_steps: int = 5000
     c2f_save_dir: str = "checkpoints/rl/joint/c2f"
     c2f_mask_type: str = "causal"
     num_gpus: int = 1
