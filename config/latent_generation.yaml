@@ -18,6 +18,8 @@ dataset:
 # Update this after running step 01.
 sft:
   prompt_data: "data/prompt_data/gpt-5-nano-2025-08-07/docs_0000100000/gemini-3-pro-7/latent-generation/sft.jsonl"
+  micro_batch_size_per_gpu: 32   # was 16 — H200 headroom
+  train_batch_size: 128          # was 64 — 4 grad-accum steps
 
 # Step 05: generate from chunks 0-3 (use remaining 4-7 for held-out eval)
 generation:
@@ -28,6 +30,9 @@ generation:
 rl:
   sft_rl:
     model_path: "checkpoints/sft/checkpoint-1172"
+    ppo_micro_batch_size_per_gpu: 16
+    train_batch_size: 128
+    rollout_n: 8
   c2f_finetune:
     model_path: "checkpoints/decoder"
   joint:
@@ -36,6 +41,9 @@ rl:
     c2f_lr: 1.0e-4
     c2f_mask_type: "causal"
     train_batch_size: 256
+    c2f_save_steps: 10000
+    ppo_micro_batch_size_per_gpu: 32
+    c2f_micro_batch_size: 64
 
 num_gpus: 1
 
@@ -47,3 +55,5 @@ c2f_training:
   num_key_value_heads: 8
   head_dim: 64
   num_hidden_layers: 8
+  per_device_batch_size: 256
+  gradient_accumulation_steps: 1

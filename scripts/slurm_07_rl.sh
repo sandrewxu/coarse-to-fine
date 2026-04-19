@@ -3,9 +3,9 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus=h100:1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=4:00:00
+#SBATCH --time=1:00:00
 #SBATCH --partition=gpu
 #SBATCH --output=logs/rl/joint/rl_joint_%j.out
 #SBATCH --error=logs/rl/joint/rl_joint_%j.err
