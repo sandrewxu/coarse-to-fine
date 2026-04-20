@@ -283,6 +283,11 @@ class JointConfig(BaseModel):
     # 0.0 disables batching (falls back to per-sample update, legacy behaviour).
     # Tune: larger → bigger batches (better MFU), more step latency.
     c2f_batch_window: float = 0.05
+    # Call ``gc.collect()`` in the reward worker every N flushes to counter
+    # slow CPU-side object accumulation under Ray's minimal-GC regime. 0
+    # disables. ~tens of ms per collect on a multi-GB heap — negligible
+    # relative to the flush's CUDA work.
+    c2f_gc_every: int = 50
 
 
 class RlConfig(BaseModel):

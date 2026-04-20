@@ -21,12 +21,20 @@ The math delta vs. per-sample updates:
 """
 
 import asyncio
+import gc
 import os
 import shutil
 from pathlib import Path
 
 import torch
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
+
+try:
+    # Stdlib on POSIX; absent on Windows. Only used for a DEBUG-level RSS log
+    # per flush, so a missing module is a no-op rather than a failure.
+    import resource as _resource
+except ImportError:  # pragma: no cover - Windows path, not our target
+    _resource = None  # type: ignore[assignment]
 
 from src.common.logging import get_logger
 from src.rl.common import (
@@ -93,19 +101,22 @@ class JointC2FRewardManager(RewardManagerBase):
         # queue on a ``_batch_window``-second cadence and runs a single
         # batched fwd+bwd+step, resolving all futures together.
         self._batch_window: float = float(joint_cfg.get("c2f_batch_window", 0.05))
+        self._gc_every: int = int(joint_cfg.get("c2f_gc_every", 50))
         self._queue: list[dict] = []
         self._queue_lock = asyncio.Lock()
         self._flusher_running: bool = False
         self._flusher_task: asyncio.Task | None = None
+        self._flush_count: int = 0
 
         log.info(
             "JointC2FRewardManager ready. p trainable on %s, lr=%s, "
-            "malformed_reward=%s, batch_window=%ss, micro_bs=%d",
+            "malformed_reward=%s, batch_window=%ss, micro_bs=%d, gc_every=%d",
             self.device,
             c2f_lr,
             self.malformed_reward,
             self._batch_window,
             self._micro_bs,
+            self._gc_every,
         )
 
     # ── Helpers ──────────────────────────────────────────────────────────────
@@ -372,16 +383,22 @@ class JointC2FRewardManager(RewardManagerBase):
                     it["future"].set_result({"reward": -loss_i, "p_loss": loss_i})
 
             self._step += n_train
+            avg_train_loss = float(train_loss_cpu.mean().item())
             log.info(
                 "[Joint] step=%d train_batch=%d p_loss=%.4f reward=%.4f",
                 self._step,
                 n_train,
-                float(train_loss_cpu.mean().item()),
-                -float(train_loss_cpu.mean().item()),
+                avg_train_loss,
+                -avg_train_loss,
             )
             if self._step - self._last_save_step >= self._save_steps:
                 self._last_save_step = self._step
                 self._save_checkpoint()
+
+            # Drop references to per-flush tensors so they're collectable
+            # immediately — closes any lifetime ambiguity that could keep the
+            # autograd graph or CPU loss tensor alive past ``step()``.
+            del train_ids, train_labels, train_losses, train_loss_cpu
 
         # ── VALIDATION path: forward only, no grads, no optimizer step ────
         if val_items:
@@ -403,6 +420,8 @@ class JointC2FRewardManager(RewardManagerBase):
                 loss_i = float(val_loss_cpu[i].item())
                 if not it["future"].done():
                     it["future"].set_result({"reward": -loss_i, "p_loss": loss_i})
+
+            del val_ids, val_labels, val_losses, val_loss_cpu
 
     async def _flusher(self) -> None:
         """Drain the queue in coalesced batches until empty, then exit.
@@ -428,6 +447,10 @@ class JointC2FRewardManager(RewardManagerBase):
                         # that lands after this point will see
                         # ``_flusher_running=False`` and spawn a new flusher.
                         self._flusher_running = False
+                        # Drop the coroutine-frame reference so captured
+                        # ``batch_items`` from prior iterations don't linger
+                        # until the next flush overwrites this slot.
+                        self._flusher_task = None
                         return
 
                 try:
@@ -437,6 +460,26 @@ class JointC2FRewardManager(RewardManagerBase):
                         if not it["future"].done():
                             it["future"].set_exception(exc)
                     raise
+                finally:
+                    # Drop the local ref regardless — don't let the loop
+                    # iteration hold onto the processed items.
+                    del batch_items
+
+                self._flush_count += 1
+                if self._gc_every > 0 and self._flush_count % self._gc_every == 0:
+                    # Force collection of reference cycles accumulated in
+                    # Ray's async worker. Safe: no tensors or futures live
+                    # across this call.
+                    gc.collect()
+
+                if _resource is not None:
+                    # ru_maxrss is bytes on Linux, KiB on macOS — fine as a
+                    # delta signal between flushes.
+                    log.debug(
+                        "[Joint] flush=%d rss_maxrss=%d",
+                        self._flush_count,
+                        _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss,
+                    )
         except Exception:
             # Make sure nothing is left awaiting a future that will never
             # resolve — propagate the exception to any stranded items too.
@@ -444,6 +487,7 @@ class JointC2FRewardManager(RewardManagerBase):
                 stranded = self._queue
                 self._queue = []
                 self._flusher_running = False
+                self._flusher_task = None
             for it in stranded:
                 if not it["future"].done():
                     it["future"].set_exception(

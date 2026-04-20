@@ -81,10 +81,12 @@ def _manager(mask_type: str = "causal", batch_window: float = 0.0) -> JointC2FRe
     mgr._step = 0
     mgr._last_save_step = 0
     mgr._batch_window = batch_window
+    mgr._gc_every = 0  # tests don't need periodic GC
     mgr._queue = []
     mgr._queue_lock = asyncio.Lock()
     mgr._flusher_running = False
     mgr._flusher_task = None
+    mgr._flush_count = 0
 
     # Stub save so a fake checkpoint doesn't try to touch disk.
     mgr._save_checkpoint = lambda: None  # type: ignore[method-assign]
@@ -223,9 +225,7 @@ def test_gradient_accumulation_matches_full_batch_mean():
 
         mgr2.optimizer.step = capture_and_step  # type: ignore[method-assign]
 
-        items2 = [
-            {**it, "future": asyncio.get_event_loop().create_future()} for it in items
-        ]
+        items2 = [{**it, "future": asyncio.get_event_loop().create_future()} for it in items]
         for it2 in items2:
             it2["input_ids"] = it2["input_ids"].clone()
             it2["labels"] = it2["labels"].clone()
@@ -234,9 +234,7 @@ def test_gradient_accumulation_matches_full_batch_mean():
         # Compare against reference model's grads, name-by-name.
         for name, ref_param in ref_model.named_parameters():
             assert name in captured, f"missing grad for {name}"
-            torch.testing.assert_close(
-                captured[name], ref_param.grad, atol=1e-6, rtol=1e-5
-            )
+            torch.testing.assert_close(captured[name], ref_param.grad, atol=1e-6, rtol=1e-5)
 
     asyncio.run(run())
 
@@ -424,6 +422,93 @@ def test_flusher_exits_and_restarts_on_empty_queue():
         r2 = await enqueue_one(2)
         assert isinstance(r1, float)
         assert isinstance(r2, float)
+
+    asyncio.run(run())
+
+
+def test_flusher_task_ref_cleared_after_drain():
+    """On clean exit, ``_flusher_task`` should drop to None so the captured
+    coroutine frame (and any ``batch_items`` it held) is collectable without
+    waiting to be overwritten by the next flusher spawn."""
+
+    async def run():
+        mgr = _manager(batch_window=0.01)
+
+        async def enqueue_one() -> float:
+            fut: asyncio.Future = asyncio.get_event_loop().create_future()
+            async with mgr._queue_lock:
+                mgr._queue.append(
+                    {
+                        "input_ids": torch.tensor([1, 2, 3, 4], dtype=torch.long),
+                        "labels": torch.tensor([-100, 2, 3, 4], dtype=torch.long),
+                        "is_validate": False,
+                        "future": fut,
+                    }
+                )
+                should_start = not mgr._flusher_running
+                if should_start:
+                    mgr._flusher_running = True
+            if should_start:
+                mgr._flusher_task = asyncio.create_task(mgr._flusher())
+            return (await fut)["reward"]
+
+        await enqueue_one()
+        # Give the flusher one more tick to hit the empty-queue exit path.
+        await asyncio.sleep(0.1)
+        assert mgr._flusher_running is False
+        assert mgr._flusher_task is None
+
+    asyncio.run(run())
+
+
+def test_flusher_triggers_gc_on_cadence():
+    """``gc.collect()`` should be called exactly once every ``_gc_every`` flushes."""
+    import gc as _gc
+
+    async def run():
+        mgr = _manager(batch_window=0.005)
+        mgr._gc_every = 2  # collect every other flush
+
+        gc_calls = {"n": 0}
+        real_collect = _gc.collect
+
+        def counting_collect(*a, **kw):
+            gc_calls["n"] += 1
+            return real_collect(*a, **kw)
+
+        # Patch the reward_joint module's reference so only flusher-triggered
+        # collects increment the counter.
+        import src.rl.reward_joint as rj
+
+        rj.gc.collect = counting_collect  # type: ignore[attr-defined]
+        try:
+
+            async def enqueue_once():
+                fut: asyncio.Future = asyncio.get_event_loop().create_future()
+                async with mgr._queue_lock:
+                    mgr._queue.append(
+                        {
+                            "input_ids": torch.tensor([1, 2, 3, 4], dtype=torch.long),
+                            "labels": torch.tensor([-100, 2, 3, 4], dtype=torch.long),
+                            "is_validate": False,
+                            "future": fut,
+                        }
+                    )
+                    should_start = not mgr._flusher_running
+                    if should_start:
+                        mgr._flusher_running = True
+                if should_start:
+                    mgr._flusher_task = asyncio.create_task(mgr._flusher())
+                await fut
+
+            # Four sequential flushes → gc every 2 → two collects.
+            for _ in range(4):
+                await enqueue_once()
+                await asyncio.sleep(0.05)  # let the flusher drain and exit
+        finally:
+            rj.gc.collect = real_collect  # type: ignore[attr-defined]
+
+        assert gc_calls["n"] == 2, gc_calls
 
     asyncio.run(run())
 

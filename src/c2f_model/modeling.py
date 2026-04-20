@@ -265,12 +265,58 @@ class C2FAttention(Qwen3Attention):
 
 
 class C2FDecoderLayer(Qwen3DecoderLayer):
-    """Qwen3DecoderLayer using :class:`C2FAttention` instead of Qwen3Attention."""
+    """Qwen3DecoderLayer using :class:`C2FAttention` instead of Qwen3Attention.
+
+    Adds an optional ``residual_override`` kwarg to ``forward``. When provided,
+    the post-attention residual connection uses ``residual_override`` instead
+    of the layer's own ``hidden_states``. This is used at layer 0 in block mode
+    to split the residual path (masked, to prevent leak of ``input_ids[i]``
+    into ``logits[i]``) from the K/V path (real embeddings, so earlier-scale
+    attention actually carries token info). Default ``None`` preserves the
+    upstream Qwen3DecoderLayer behavior bit-for-bit.
+    """
 
     def __init__(self, config, layer_idx: int) -> None:
         super().__init__(config, layer_idx)
         # C2F: replace Qwen3Attention with C2FAttention (no RoPE)
         self.self_attn = C2FAttention(config=config, layer_idx=layer_idx)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        cache_position: torch.LongTensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        residual_override: torch.Tensor | None = None,  # C2F: block-mode residual split
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.Tensor:
+        # C2F: mirror Qwen3DecoderLayer.forward, but allow the post-attention
+        # residual to come from ``residual_override``. K/V still use the real
+        # ``hidden_states`` via input_layernorm → self_attn.
+        residual = hidden_states if residual_override is None else residual_override
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, _ = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        # C2F: second residual uses post-attn hidden_states as normal — at this
+        # point the masked residual is already baked in, so no override needed.
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
 
 
 class C2FModel(Qwen3Model):
@@ -299,13 +345,14 @@ class C2FModel(Qwen3Model):
         # C2F: per-scale learned absolute position embeddings
         self.scale_pos_emb = C2FScaleEmbedding(config)
 
-        # C2F: learned mask embedding for block mode.  In block mode the loss is
-        # unshifted (logits[i] predicts labels[i]), so the target token IS the
-        # input token.  The residual connection carries token_emb(input_ids[i])
-        # straight to the LM head, giving the model a trivial shortcut.
-        # Replacing content token embeddings with this learned vector removes
-        # the shortcut: the model must predict each token from attention context
-        # (earlier scales) + positional embeddings only.
+        # C2F: learned mask embedding for block mode. Used ONLY on the layer-0
+        # post-attention residual at content positions; real token embeddings
+        # still feed Q/K/V at every layer so cross-scale attention carries real
+        # per-example info. With the strict block mask (no self-attend, no
+        # same-scale attend for content), attn_out[i] at layer 0 has no
+        # dependence on input_ids[i]; the masked residual then breaks the
+        # residual-stream leak that unshifted CE would otherwise expose.
+        # See C2FModel.forward for the full construction.
         self.mask_embedding = nn.Parameter(torch.zeros(config.hidden_size))
 
         # C2F: number of content positions (BOS + all scales) for masking logic
@@ -342,25 +389,50 @@ class C2FModel(Qwen3Model):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        # C2F: in block mode, replace content token embeddings with the learned
-        # mask embedding to prevent residual leakage of the target token.
-        # BOS (position 0) and padding keep their original embeddings.
-        # Applies during both training and eval (loss computation always needs
-        # the leak removed).  At inference time, callers that want actual token
-        # context for already-generated scales can pass pre-built inputs_embeds
-        # directly, which bypasses this masking.
-        if self.config.mask_type == "block" and not caller_provided_embeds:
-            content_end = min(self._content_len, inputs_embeds.shape[1])
-            mask_vec = self.mask_embedding.broadcast_to(inputs_embeds[:, 1:content_end].shape)
-            inputs_embeds = inputs_embeds.clone()
-            inputs_embeds[:, 1:content_end] = mask_vec
-
-        # C2F: add per-scale absolute position embeddings before the transformer layers
-        inputs_embeds = inputs_embeds + self.scale_pos_emb(
+        # C2F: per-scale absolute position embeddings replace RoPE. Computed once
+        # and added to both the real embedding stream (used as Q/K/V input) and the
+        # block-mode masked residual built below.
+        scale_pos = self.scale_pos_emb(
             batch_size=inputs_embeds.shape[0],
             seq_len=inputs_embeds.shape[1],
             device=inputs_embeds.device,
         )
+        inputs_embeds = inputs_embeds + scale_pos
+
+        # C2F: block mode uses unshifted CE (logits[i] predicts labels[i] = input_ids[i])
+        # which would leak via the residual stream if input_emb(input_ids[i]) reached
+        # the LM head at position i. We kill that leak by overriding the layer-0
+        # post-attention residual at content positions with mask_embedding +
+        # scale_pos_emb[i]. K/V at every layer still see real embeddings so cross-scale
+        # attention actually carries per-example information (an earlier fix clobbered
+        # the embeddings before the transformer, which killed the leak but also
+        # destroyed K/V content for earlier-scale attention — collapsing training loss
+        # to per-position unigram).
+        #
+        # The block attention mask strictly forbids self-attend and same-scale attend
+        # for content tokens, so attn_out[i] at layer 0 has no dependence on
+        # input_ids[i]; combined with a masked residual the layer-0 output at i is
+        # leak-free, and the property propagates by induction through later layers.
+        #
+        # Callers that pass ``inputs_embeds`` directly (e.g. inference with encoder
+        # embeddings for already-generated scales) are responsible for their own leak
+        # handling; we do not touch the residual in that case.
+        block_residual_override: torch.Tensor | None = None
+        if self.config.mask_type == "block" and not caller_provided_embeds:
+            if past_key_values is not None:
+                raise ValueError(
+                    "C2F block mode does not support past_key_values without "
+                    "caller-provided inputs_embeds. Block-mode inference should "
+                    "supply scale embeddings explicitly via inputs_embeds."
+                )
+            content_end = min(self._content_len, inputs_embeds.shape[1])
+            mask_vec = self.mask_embedding.to(inputs_embeds.dtype)  # (H,)
+            block_residual_override = inputs_embeds.clone()
+            # Content-position residual: mask_vec + scale_pos_emb[pos]. BOS and
+            # padding positions inherit their real embedding (labels are -100 there).
+            block_residual_override[:, 1:content_end] = (
+                mask_vec + scale_pos[:, 1:content_end]
+            )
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
@@ -412,7 +484,10 @@ class C2FModel(Qwen3Model):
         # C2F: no rotary embeddings; pass (None, None) to satisfy the layer call signature
         position_embeddings = (None, None)
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
+            # C2F: layer 0 in block mode swaps in the masked residual; see the
+            # block_residual_override construction above for the rationale.
+            layer_residual_override = block_residual_override if layer_idx == 0 else None
             hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[decoder_layer.attention_type],
@@ -421,6 +496,7 @@ class C2FModel(Qwen3Model):
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 cache_position=cache_position,
+                residual_override=layer_residual_override,
                 **kwargs,
             )
 
