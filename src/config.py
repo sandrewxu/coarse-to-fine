@@ -113,7 +113,7 @@ class C2FTrainingConfig(BaseModel):
     dataset_dir: str = "data/local_generations"
     dataset_format: str = "sft"
     tokenizer: str = "space"
-    tokenizer_dir: str = "checkpoints/decoder/tokenizer"
+    tokenizer_dir: str = "checkpoints/tokenizer"
     checkpoint_dir: str = "checkpoints/decoder"
     num_gpus: int = 1
     hidden_size: int | None = None

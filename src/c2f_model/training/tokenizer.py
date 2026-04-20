@@ -28,11 +28,15 @@ log = get_logger(__name__)
 
 _LAYER_PATTERN = re.compile(r"^z_\d+:\s*(.*)$")
 
-# Special tokens — indices 0-3 are reserved.
+# Special tokens — indices 0-4 are reserved.
 PAD_TOKEN = "[PAD]"
 UNK_TOKEN = "[UNK]"
 BOS_TOKEN = "[BOS]"
 EOS_TOKEN = "[EOS]"
+# [MASK] is the MDLM absorbing state. Distinct from [UNK] so that
+# `x0 == mask_id` cannot happen by construction — the NEG_INF sentinel
+# in `subs_parameterization` would otherwise leak into the loss.
+MASK_TOKEN = "[MASK]"
 
 
 # ── Text iterators (one line per scale segment) ────────────────────────────
@@ -98,7 +102,7 @@ def train_space_tokenizer(
     tokenizer.pre_tokenizer = WhitespaceSplit()
 
     trainer = WordLevelTrainer(
-        special_tokens=[PAD_TOKEN, UNK_TOKEN, BOS_TOKEN, EOS_TOKEN],
+        special_tokens=[PAD_TOKEN, UNK_TOKEN, BOS_TOKEN, EOS_TOKEN, MASK_TOKEN],
         min_frequency=min_frequency,
     )
     tokenizer.train_from_iterator(texts, trainer)
@@ -110,6 +114,7 @@ def train_space_tokenizer(
         eos_token=EOS_TOKEN,
         pad_token=PAD_TOKEN,
         unk_token=UNK_TOKEN,
+        mask_token=MASK_TOKEN,
     )
     return hf_tokenizer
 

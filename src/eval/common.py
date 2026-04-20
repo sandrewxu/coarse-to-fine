@@ -28,7 +28,7 @@ def load_space_tokenizer(config: dict[str, Any], tokenizer_dir: Path | None = No
 
     c2f_cfg = config.get("c2f_training", {})
     if tokenizer_dir is None:
-        tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
+        tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/tokenizer"))
     if not tokenizer_dir.is_absolute():
         tokenizer_dir = PROJECT_ROOT / tokenizer_dir
 

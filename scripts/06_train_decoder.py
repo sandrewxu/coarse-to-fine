@@ -147,7 +147,7 @@ def main() -> int:
     if tokenizer_type == "space":
         from src.c2f_model.training.tokenizer import load_or_train_space_tokenizer
 
-        tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
+        tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/tokenizer"))
         if not tokenizer_dir.is_absolute():
             tokenizer_dir = PROJECT_ROOT / tokenizer_dir
         tokenizer = load_or_train_space_tokenizer(

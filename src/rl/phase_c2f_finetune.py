@@ -108,7 +108,7 @@ def run_c2f_finetune(
     log.info("Phase B — Step 3: Fine-tuning C2F model on q_φ samples...")
 
     c2f_train_cfg = config.get("c2f_training", {})
-    tokenizer_dir = Path(c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
+    tokenizer_dir = Path(c2f_train_cfg.get("tokenizer_dir", "checkpoints/tokenizer"))
     if not tokenizer_dir.is_absolute():
         tokenizer_dir = project_root / tokenizer_dir
 

@@ -241,7 +241,7 @@ def load_c2f_components(
 
     # ── Space tokenizer ──────────────────────────────────────────────────────
     c2f_train_cfg = exp_config.get("c2f_training", {})
-    tokenizer_dir = Path(c2f_train_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
+    tokenizer_dir = Path(c2f_train_cfg.get("tokenizer_dir", "checkpoints/tokenizer"))
     log.info("Loading space tokenizer from %s", tokenizer_dir)
     space_tokenizer = load_or_train_space_tokenizer(
         tokenizer_dir=tokenizer_dir,

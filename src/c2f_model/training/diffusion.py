@@ -12,11 +12,12 @@ Bit-faithful port of the continuous-time SUBS variant of MDLM
 Intentional deviations from upstream (also documented in
 ``plans/please-thoroughly-examine-my-kind-sunset.md``):
 
-1. The MASK index is the space tokenizer's ``[UNK]`` (id=1) — vocab parity
-   with the AR/C2F checkpoints is required by ``check_vocab_consistency``
-   in ``src/eval/common.py``. ``[UNK]`` never appears in real docs (the
-   word-level vocab is closed over the training data), so it's an unused
-   slot serving the same role as a brand-new MASK token.
+1. The MASK index is a dedicated ``[MASK]`` token (id=4) added to the space
+   tokenizer's reserved specials — it never appears in real docs, so
+   ``x0 == mask_id`` is impossible by construction. This matches upstream
+   MDLM. The AR/C2F checkpoints share the same extended vocab for
+   ``check_vocab_consistency`` (``src/eval/common.py``); they simply never
+   emit [MASK] at training time, treating it as an unused output class.
 2. Backbone is ``Qwen3ForCausalLM`` (matched to AR/C2F) with bidirectional
    attention enabled by passing a 4D additive mask. The MDLM math is
    backbone-agnostic.
@@ -91,6 +92,10 @@ def subs_parameterization(logits: torch.Tensor, xt: torch.Tensor, mask_id: int) 
     logits = logits.clone()
     logits[..., mask_id] = NEG_INF
     log_probs = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+    # Re-pin MASK to NEG_INF exactly: the finite sentinel leaks through
+    # log-softmax as `NEG_INF - logsumexp(row)`, which is slightly more
+    # negative than NEG_INF and breaks the "MASK is -inf everywhere" invariant.
+    log_probs[..., mask_id] = NEG_INF
     unmasked = xt != mask_id
     log_probs[unmasked] = NEG_INF
     log_probs[unmasked, xt[unmasked]] = 0.0

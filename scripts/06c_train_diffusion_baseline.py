@@ -169,10 +169,10 @@ def main() -> int:
     # Reuse the C2F space tokenizer for vocab parity at eval time.
     from src.c2f_model.training.dataset import ARDataset
     from src.c2f_model.training.diffusion import DiffusionTrainer
-    from src.c2f_model.training.tokenizer import load_or_train_space_tokenizer
+    from src.c2f_model.training.tokenizer import MASK_TOKEN, load_or_train_space_tokenizer
 
     c2f_cfg = config.get("c2f_training", {})
-    tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/decoder/tokenizer"))
+    tokenizer_dir = Path(c2f_cfg.get("tokenizer_dir", "checkpoints/tokenizer"))
     if not tokenizer_dir.is_absolute():
         tokenizer_dir = PROJECT_ROOT / tokenizer_dir
     tokenizer = load_or_train_space_tokenizer(
@@ -182,15 +182,16 @@ def main() -> int:
         parquet_filename=parquet_filename,
     )
     vocab_size = tokenizer.vocab_size
-    mask_id = tokenizer.unk_token_id
+    mask_id = tokenizer.convert_tokens_to_ids(MASK_TOKEN)
     pad_id = tokenizer.pad_token_id
-    if mask_id is None:
+    if mask_id is None or mask_id == tokenizer.unk_token_id:
         raise RuntimeError(
-            "Tokenizer has no unk_token_id; MDLM baseline requires [UNK] as the MASK index."
+            f"Tokenizer does not contain {MASK_TOKEN!r} as a distinct id; "
+            f"delete {tokenizer_dir} and retrain."
         )
     log.info(
         f"  Space tokenizer ready (vocab_size={vocab_size}, "
-        f"mask_id={mask_id} [UNK], pad_id={pad_id})"
+        f"mask_id={mask_id} [MASK], pad_id={pad_id})"
     )
 
     wandb_run = None
