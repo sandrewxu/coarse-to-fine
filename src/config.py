@@ -123,6 +123,7 @@ class C2FTrainingConfig(BaseModel):
     num_key_value_heads: int | None = None
     head_dim: int | None = None
     per_device_batch_size: int = 8
+    eval_batch_size: int | None = None  # falls back to per_device_batch_size
     gradient_accumulation_steps: int = 4
     epochs: int = 1
     lr: float = 5.0e-5
@@ -160,6 +161,7 @@ class DiffusionTrainingConfig(BaseModel):
     num_key_value_heads: int | None = None
     head_dim: int | None = None
     per_device_batch_size: int = 8
+    eval_batch_size: int | None = None  # falls back to per_device_batch_size
     gradient_accumulation_steps: int = 4
     epochs: int = 1
     lr: float = 5.0e-5
@@ -201,6 +203,7 @@ class ARTrainingConfig(BaseModel):
     num_key_value_heads: int | None = None
     head_dim: int | None = None
     per_device_batch_size: int = 8
+    eval_batch_size: int | None = None  # falls back to per_device_batch_size
     gradient_accumulation_steps: int = 4
     epochs: int = 1
     lr: float = 5.0e-5

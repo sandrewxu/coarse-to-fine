@@ -148,6 +148,8 @@ def build_training_args(
     return TrainingArguments(
         output_dir=str(checkpoint_dir),
         per_device_train_batch_size=c2f.get("per_device_batch_size", 8),
+        per_device_eval_batch_size=c2f.get("eval_batch_size")
+        or c2f.get("per_device_batch_size", 8),
         gradient_accumulation_steps=c2f.get("gradient_accumulation_steps", 4),
         num_train_epochs=c2f.get("epochs", 10),
         learning_rate=c2f.get("lr", 5e-5),
