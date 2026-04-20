@@ -238,6 +238,12 @@ class RlSftConfig(BaseModel):
     ppo_micro_batch_size_per_gpu: int = 8
     dataloader_num_workers: int = 4
     epochs: int = 1
+    # vLLM rollout knobs — propagated to veRL as ``actor_rollout_ref.rollout.*``
+    # in ``src/rl/verl_config.py``. Must be declared here so YAML values aren't
+    # silently dropped by Pydantic's default extra='ignore' behaviour.
+    rollout_gpu_memory_utilization: float = 0.6
+    rollout_max_num_seqs: int = 256
+    rollout_max_num_batched_tokens: int = 32768
 
 
 class C2fFinetuneConfig(BaseModel):
@@ -278,6 +284,12 @@ class JointConfig(BaseModel):
     epochs: int = 12
     c2f_micro_batch_size: int = 32
     c2f_keep_last_n: int = 2
+    # vLLM rollout knobs — propagated to veRL as ``actor_rollout_ref.rollout.*``
+    # in ``src/rl/verl_config.py``. Must be declared here so YAML values aren't
+    # silently dropped by Pydantic's default extra='ignore' behaviour.
+    rollout_gpu_memory_utilization: float = 0.6
+    rollout_max_num_seqs: int = 256
+    rollout_max_num_batched_tokens: int = 32768
     # Back-off (seconds) between drains in the opportunistic flusher. The
     # flusher drains immediately on each iteration; this window is the pause
     # between drains, during which additional ``run_single`` calls enqueue.
