@@ -67,14 +67,21 @@ def run_joint(
     cmd = [sys.executable, "-m", "verl.trainer.main_ppo", *overrides]
     log.info("Joint — REINFORCE on q_φ + MLE on p_θ. Command: %s", " ".join(cmd))
 
-    resolved_config_path = (
-        str(config_path) if config_path else str(project_root / "config" / "latent_generation.yaml")
-    )
-    env = {
-        **os.environ,
-        "C2F_CONFIG_PATH": resolved_config_path,
-        # JointC2FRewardManager trains p_θ on GPU inside a Ray worker.
-        # Prevent Ray from clearing CUDA_VISIBLE_DEVICES for 0-GPU processes.
-        "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
-    }
-    return subprocess.run(cmd, cwd=project_root, env=env).returncode
+    # Materialise the (CLI-overridden) config to a temp YAML so the reward
+    # worker, which reloads it from disk via C2F_CONFIG_PATH, sees the same
+    # values as the main process. Pointing at the original YAML drops any
+    # ``rl.joint.*`` override on the floor.
+    from src.rl.train import materialize_config_for_workers
+
+    worker_config_path = materialize_config_for_workers(config, project_root)
+    try:
+        env = {
+            **os.environ,
+            "C2F_CONFIG_PATH": str(worker_config_path),
+            # JointC2FRewardManager trains p_θ on GPU inside a Ray worker.
+            # Prevent Ray from clearing CUDA_VISIBLE_DEVICES for 0-GPU processes.
+            "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
+        }
+        return subprocess.run(cmd, cwd=project_root, env=env).returncode
+    finally:
+        worker_config_path.unlink(missing_ok=True)

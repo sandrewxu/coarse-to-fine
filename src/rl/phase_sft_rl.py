@@ -68,8 +68,14 @@ def run_sft_rl(
     cmd = [sys.executable, "-m", "verl.trainer.main_ppo", *overrides]
     log.info("Phase A — GRPO on q_φ. Command: %s", " ".join(cmd))
 
-    resolved_config_path = (
-        str(config_path) if config_path else str(project_root / "config" / "latent_generation.yaml")
-    )
-    env = {**os.environ, "C2F_CONFIG_PATH": resolved_config_path}
-    return subprocess.run(cmd, cwd=project_root, env=env).returncode
+    # Serialise the (CLI-overridden) config so the reward worker sees the
+    # same values as the main process — the worker reloads from disk via
+    # C2F_CONFIG_PATH and won't pick up any in-memory ``rl.sft_rl.*`` override.
+    from src.rl.train import materialize_config_for_workers
+
+    worker_config_path = materialize_config_for_workers(config, project_root)
+    try:
+        env = {**os.environ, "C2F_CONFIG_PATH": str(worker_config_path)}
+        return subprocess.run(cmd, cwd=project_root, env=env).returncode
+    finally:
+        worker_config_path.unlink(missing_ok=True)

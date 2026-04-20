@@ -32,6 +32,9 @@ rl:
     train_batch_size: 128
     ppo_micro_batch_size_per_gpu: 16
     c2f_micro_batch_size: 128
+    # See comment in H200_joint_causal.yaml: tuned to cover one rollout window.
+    c2f_batch_window: 2.5
+    c2f_gc_every: 5
 
 num_gpus: 1
 

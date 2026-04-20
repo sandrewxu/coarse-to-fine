@@ -31,6 +31,12 @@ rl:
     train_batch_size: 256
     ppo_micro_batch_size_per_gpu: 128
     c2f_micro_batch_size: 256
+    # Window the flusher waits for concurrent run_single coroutines to
+    # accumulate. Default in src/config.py is 0.05 s, but vLLM rollouts take
+    # ~2 s here — too short a window produces tiny batches (5–20 samples)
+    # and actually slows training. Tuned to cover one rollout.
+    c2f_batch_window: 2.5
+    c2f_gc_every: 5
 
 num_gpus: 1
 

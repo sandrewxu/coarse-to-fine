@@ -12,7 +12,12 @@ plus the CLI override parser. Heavy phase logic lives in the sibling
 three phases route their CLI ``key=value`` overrides through the same parser.
 """
 
+import os
+import tempfile
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from src.common.logging import get_logger
 from src.rl.phase_c2f_finetune import run_c2f_finetune
@@ -23,11 +28,38 @@ log = get_logger(__name__)
 
 __all__ = [
     "apply_overrides",
+    "materialize_config_for_workers",
     "run_c2f_finetune",
     "run_joint",
     "run_sft_rl",
     "validate_checkpoint_paths",
 ]
+
+
+def materialize_config_for_workers(config: dict[str, Any], project_root: Path) -> Path:
+    """Serialise the (CLI-overridden) config dict to a temp YAML and return its path.
+
+    The RL reward workers live in separate Ray actors and re-read the
+    experiment YAML via ``load_exp_config()`` (see ``src/rl/common.py``), which
+    resolves the path from the ``C2F_CONFIG_PATH`` env var. If that path
+    points at the original on-disk YAML, any ``rl.*`` override applied by
+    :func:`apply_overrides` in the main process never reaches the worker —
+    the worker sees the file's default values only.
+
+    Round-tripping the already-validated dict through ``yaml.safe_dump`` +
+    ``yaml.safe_load`` (done inside ``load_config`` on the worker side) is
+    safe because ``load_config`` returns ``model_dump()`` output, which is
+    primitive-typed. The caller is responsible for deleting the returned
+    temp file after the subprocess finishes.
+    """
+    fd, path = tempfile.mkstemp(suffix=".yaml", prefix="c2f_exp_", dir=str(project_root))
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+    except Exception:
+        Path(path).unlink(missing_ok=True)
+        raise
+    return Path(path)
 
 
 # ── CLI override parsing ─────────────────────────────────────────────────────
