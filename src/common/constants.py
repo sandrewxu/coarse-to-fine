@@ -11,7 +11,7 @@ Pydantic schema in ``src/config.py``.
 # unset makes vLLM reserve KV cache for that full context, which silently
 # OOMs a single H100 (even 141 GiB) when colocated with an FSDP actor.
 VLLM_MAX_MODEL_LEN: int = 512
-VLLM_MAX_NUM_SEQS: int = 64
+VLLM_MAX_NUM_SEQS: int = 1536
 
 # Canonical scale layout used across the codebase. Override per-experiment via
 # `scale_lengths` in the config YAML.

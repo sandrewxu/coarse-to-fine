@@ -37,7 +37,7 @@ if [ -d ".venv" ]; then
 fi
 
 NUM_GPUS=${NUM_GPUS:-1}
-CONFIG=${CONFIG:-config/latent_generation.yaml}
+CONFIG=${CONFIG:-config/H100_joint_causal.yaml}
 DATA=${DATA:-data/local_generations/c2f_train.parquet}
 
 if [ "$NUM_GPUS" -gt 1 ]; then

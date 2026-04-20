@@ -39,7 +39,7 @@ def _vllm_worker(
         trust_remote_code=True,
         max_model_len=VLLM_MAX_MODEL_LEN,
         max_num_seqs=VLLM_MAX_NUM_SEQS,
-        gpu_memory_utilization=0.7,
+        gpu_memory_utilization=0.9,
     )
     sampling_params = SamplingParams(**sampling_kwargs)
     tokenizer = llm.get_tokenizer()

@@ -257,7 +257,7 @@ class JointConfig(BaseModel):
     c2f_model_path: str = "checkpoints/decoder"
     c2f_lr: float = 1e-4
     c2f_weight_decay: float = 0.01
-    c2f_save_steps: int = 5000
+    c2f_save_steps: int = 20000
     c2f_save_dir: str = "checkpoints/rl/joint/c2f"
     c2f_mask_type: str = "causal"
     num_gpus: int = 1
@@ -266,14 +266,15 @@ class JointConfig(BaseModel):
     max_prompt_length: int = 256
     max_response_length: int = 256
     train_batch_size: int = 256
+    save_freq: int = 150
     temperature: float = 1.0
     lr: float = 1e-6
     malformed_reward: float = -10.0
     ppo_micro_batch_size_per_gpu: int = 16
     dataloader_num_workers: int = 4
-    epochs: int = 1
+    epochs: int = 12
     c2f_micro_batch_size: int = 32
-    c2f_keep_last_n: int = 3
+    c2f_keep_last_n: int = 2
 
 
 class RlConfig(BaseModel):

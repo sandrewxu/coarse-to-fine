@@ -57,6 +57,7 @@ c2f_training:
   num_hidden_layers: 8
   per_device_batch_size: 256
   gradient_accumulation_steps: 1
+  tokenizer_dir: "checkpoints/decoder_causal/tokenizer"
 
 # Step 6b: no-latents AR baseline. Architecture and optimization are matched
 # to c2f_training so 09_eval_nll.py can directly compare nats/word.

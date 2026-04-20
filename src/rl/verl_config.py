@@ -70,6 +70,8 @@ def build_verl_grpo_overrides(
         # ── Trainer ─────────────────────────────────────────────────────────
         f"++trainer.n_gpus_per_node={num_gpus}",
         f"++trainer.default_local_dir={checkpoint_dir}",
+        f"++trainer.save_freq={rl_sft_config.get('save_freq', 150)}",
+        f"++trainer.max_actor_ckpt_to_keep={rl_sft_config.get('max_actor_ckpt_to_keep', 2)}",
         # ── Model (main_ppo uses actor_rollout_ref.model.*, not model.*) ───────
         f"++actor_rollout_ref.model.path={model_path}",
         "++actor_rollout_ref.actor.fsdp_config.model_dtype=bf16",
@@ -191,6 +193,8 @@ def build_verl_joint_overrides(
         # ── Trainer ─────────────────────────────────────────────────────────
         f"++trainer.n_gpus_per_node={num_gpus}",
         f"++trainer.default_local_dir={checkpoint_dir}",
+        f"++trainer.save_freq={rl_joint_config.get('save_freq', 150)}",
+        f"++trainer.max_actor_ckpt_to_keep={rl_joint_config.get('max_actor_ckpt_to_keep', 2)}",
         # ── Model ───────────────────────────────────────────────────────────
         f"++actor_rollout_ref.model.path={model_path}",
         "++actor_rollout_ref.actor.fsdp_config.model_dtype=bf16",
