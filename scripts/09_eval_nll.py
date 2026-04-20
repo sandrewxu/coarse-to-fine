@@ -60,6 +60,8 @@ def _print_summary(result: dict[str, Any]) -> None:
         log.info("  mask_type        = %s", result["mask_type"])
     if "K" in result:
         log.info("  IWAE K           = %d", result["K"])
+    if "N" in result:
+        log.info("  MC samples N     = %d", result["N"])
     log.info("  num_docs         = %d", result["num_docs"])
     log.info("  total_tokens     = %d", result["total_tokens"])
     log.info("  nats/word        = %.4f  (bits/word = %.4f, ppl = %.2f)", mean, bits, ppl)
@@ -88,6 +90,12 @@ def main() -> int:
         type=int,
         default=1,
         help="IWAE sample count for c2f (only K=1 supported; K>1 needs q_φ sampler).",
+    )
+    parser.add_argument(
+        "--N",
+        type=int,
+        default=128,
+        help="MC sample count per doc for diffusion NELBO (analog of --K).",
     )
     parser.add_argument(
         "--config",
@@ -139,7 +147,15 @@ def main() -> int:
             K=args.K,
         )
     elif args.model_kind == "diffusion":
-        result = eval_diffusion()
+        result = eval_diffusion(
+            ckpt=args.ckpt,
+            test=args.test,
+            config=config,
+            limit=args.limit,
+            tokenizer_dir=args.tokenizer_dir,
+            N=args.N,
+            batch_size=args.batch_size,
+        )
     else:  # pragma: no cover — argparse choices guard this
         raise ValueError(args.model_kind)
 

@@ -20,8 +20,15 @@
 #   NUM_GPUS=4
 
 set -e
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Under sbatch, SLURM copies this script to /var/spool/slurmd/... so
+# ${BASH_SOURCE[0]} no longer points to the repo. SLURM_SUBMIT_DIR is the
+# directory `sbatch` was invoked from — use it when available.
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+  PROJECT_ROOT="$SLURM_SUBMIT_DIR"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 mkdir -p "$PROJECT_ROOT/logs/pretrain"
 cd "$PROJECT_ROOT"
 

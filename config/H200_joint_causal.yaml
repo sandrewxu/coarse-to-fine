@@ -59,3 +59,16 @@ ar_training:
   num_hidden_layers: 8
   checkpoint_dir: "checkpoints/ar_baseline_causal"
   per_device_batch_size: 512
+
+# Step 6c: MDLM-style masked-diffusion baseline. Architecture matched to
+# c2f_training. Reuses [UNK] from the c2f tokenizer as the MASK index.
+diffusion_training:
+  fsdp: ""
+  hidden_size: 512
+  intermediate_size: 2048
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  num_hidden_layers: 8
+  checkpoint_dir: "checkpoints/diffusion_baseline_causal"
+  per_device_batch_size: 512

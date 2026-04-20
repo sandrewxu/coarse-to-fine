@@ -141,6 +141,47 @@ class C2FTrainingConfig(BaseModel):
     mask_type: str = "block"
 
 
+class DiffusionTrainingConfig(BaseModel):
+    """MDLM-faithful masked-diffusion baseline (continuous-time SUBS).
+
+    Reads the same parquet and reuses the same space tokenizer as
+    ``c2f_training`` / ``ar_training``. The MASK index is the tokenizer's
+    ``[UNK]`` (id=1) — see ``src/c2f_model/training/diffusion.py``.
+    """
+
+    dataset_dir: str = "data/local_generations"
+    dataset_format: str = "sft"
+    checkpoint_dir: str = "checkpoints/diffusion_baseline"
+    num_gpus: int = 1
+    hidden_size: int | None = None
+    intermediate_size: int | None = None
+    num_hidden_layers: int | None = None
+    num_attention_heads: int | None = None
+    num_key_value_heads: int | None = None
+    head_dim: int | None = None
+    per_device_batch_size: int = 8
+    gradient_accumulation_steps: int = 4
+    epochs: int = 1
+    lr: float = 5.0e-5
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.05
+    lr_scheduler_type: str = "cosine"
+    max_grad_norm: float = 1.0
+    logging_steps: int = 10
+    save_steps: int = 500
+    eval_steps: int = 500
+    eval_split: float = 0.05
+    fsdp: str = "full_shard"
+    report_to: str = "none"
+    run_name: str = "diffusion-baseline"
+    seed: int = 42
+    # MDLM-specific knobs:
+    eps_t: float = 1e-3
+    noise_eps: float = 1e-3
+    antithetic: bool = True
+    n_eval_samples: int = 128
+
+
 class ARTrainingConfig(BaseModel):
     """No-latents autoregressive baseline matched to ``c2f_training`` for fair comparison.
 
@@ -262,6 +303,7 @@ class ExperimentConfig(BaseModel):
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     c2f_training: C2FTrainingConfig = Field(default_factory=C2FTrainingConfig)
     ar_training: ARTrainingConfig = Field(default_factory=ARTrainingConfig)
+    diffusion_training: DiffusionTrainingConfig = Field(default_factory=DiffusionTrainingConfig)
     rl: RlConfig = Field(default_factory=RlConfig)
 
     @property
@@ -286,6 +328,7 @@ _PROPAGATED_KEYS: list[tuple[str, ...]] = [
     ("generation", "num_gpus"),
     ("c2f_training", "num_gpus"),
     ("ar_training", "num_gpus"),
+    ("diffusion_training", "num_gpus"),
     ("rl", "sft_rl", "num_gpus"),
     ("rl", "c2f_finetune", "num_gpus"),
     ("rl", "joint", "num_gpus"),
@@ -294,6 +337,7 @@ _PROPAGATED_KEYS: list[tuple[str, ...]] = [
     ("generation", "seed"),
     ("c2f_training", "seed"),
     ("ar_training", "seed"),
+    ("diffusion_training", "seed"),
 ]
 
 

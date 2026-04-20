@@ -43,7 +43,9 @@
       "Bash(curl -s \"https://api.github.com/search/issues?q=repo:vllm-project/vllm+%22engine%2Fcore.py%22+%22line+342%22\")",
       "Bash(curl -s \"https://api.github.com/search/issues?q=repo:volcengine/verl+vllm+%22future.result%22\")",
       "Bash(gh issue *)",
-      "Bash(uvx ruff *)"
+      "Bash(uvx ruff *)",
+      "Bash(curl -sL https://raw.githubusercontent.com/kuleshov-group/mdlm/master/noise_schedule.py -o /tmp/mdlm_noise.py)",
+      "Bash(curl -sL https://raw.githubusercontent.com/kuleshov-group/mdlm/master/diffusion.py -o /tmp/mdlm_diff.py)"
     ]
   }
 }
