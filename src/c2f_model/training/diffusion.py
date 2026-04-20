@@ -208,7 +208,11 @@ class DiffusionTrainer(Trainer):
             antithetic=self._antithetic,
         )
         if return_outputs:
-            return loss, None
+            # HF Trainer's prediction_step does ``outputs[1:]`` and then
+            # iterates the result, so we must return *something* indexable.
+            # An empty dict satisfies the contract without leaking the
+            # logits we already discarded in ``mdlm_loss``.
+            return loss, {}
         return loss
 
 

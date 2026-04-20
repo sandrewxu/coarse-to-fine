@@ -70,3 +70,17 @@ ar_training:
   num_hidden_layers: 8
   per_device_batch_size: 256
   gradient_accumulation_steps: 1
+
+# Step 6c: MDLM-style masked-diffusion baseline. Same arch, same data.
+# [UNK] from the c2f tokenizer doubles as the MASK index — vocab parity
+# with c2f / ar checkpoints is preserved.
+diffusion_training:
+  fsdp: ""
+  hidden_size: 512
+  intermediate_size: 2048
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  num_hidden_layers: 8
+  per_device_batch_size: 256
+  gradient_accumulation_steps: 1
