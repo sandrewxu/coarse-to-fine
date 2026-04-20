@@ -228,15 +228,12 @@ def build_rl_parquet(
         data_dir = project_root / data_dir
 
     split_key = "val_split" if is_validation else "rl_split"
-    default_filename = (
-        "tinystoriesv2.val.jsonl" if is_validation else "tinystoriesv2.rl.jsonl"
-    )
+    default_filename = "tinystoriesv2.val.jsonl" if is_validation else "tinystoriesv2.rl.jsonl"
     split_file = data_dir / dataset_cfg.get(split_key, default_filename)
 
     if not split_file.exists():
         raise FileNotFoundError(
-            f"{split!r} split not found: {split_file}\n"
-            "Run step 0 (00_prepare_data.py) first."
+            f"{split!r} split not found: {split_file}\nRun step 0 (00_prepare_data.py) first."
         )
 
     log.info("Preparing %s parquet from %s ...", split, split_file)
