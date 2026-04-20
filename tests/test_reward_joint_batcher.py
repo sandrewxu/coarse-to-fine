@@ -426,6 +426,63 @@ def test_flusher_exits_and_restarts_on_empty_queue():
     asyncio.run(run())
 
 
+def test_flusher_drains_before_batch_window_elapses():
+    """Opportunistic drain: first processing must start *well before* the
+    ``batch_window`` elapses, because the flusher drains immediately and
+    uses ``batch_window`` only as a between-drain back-off. This is the
+    key property separating the current design from the earlier
+    "sleep-then-drain" design that inserted a full-window latency floor.
+    """
+    import time
+
+    async def run():
+        # Long back-off makes the bug obvious if it regresses: a broken
+        # sleep-then-drain would delay first processing by ~1 full second.
+        mgr = _manager(batch_window=1.0)
+
+        processed_at: list[float] = []
+        real_process = mgr._process_batch
+
+        def timed_process(batch_items):
+            processed_at.append(time.monotonic())
+            return real_process(batch_items)
+
+        mgr._process_batch = timed_process  # type: ignore[method-assign]
+
+        async def enqueue():
+            fut: asyncio.Future = asyncio.get_event_loop().create_future()
+            async with mgr._queue_lock:
+                mgr._queue.append(
+                    {
+                        "input_ids": torch.tensor([1, 2, 3, 4], dtype=torch.long),
+                        "labels": torch.tensor([-100, 2, 3, 4], dtype=torch.long),
+                        "is_validate": False,
+                        "future": fut,
+                    }
+                )
+                should_start = not mgr._flusher_running
+                if should_start:
+                    mgr._flusher_running = True
+            if should_start:
+                mgr._flusher_task = asyncio.create_task(mgr._flusher())
+            return (await fut)["reward"]
+
+        start = time.monotonic()
+        await enqueue()
+        first_drain_latency = processed_at[0] - start
+
+        # Should be sub-100ms — well below the 1-second back-off window.
+        # Tolerate CI jitter but fail hard if the old sleep-first pattern
+        # sneaks back in (which would put us near 1s).
+        assert first_drain_latency < 0.1, (
+            f"first drain took {first_drain_latency:.3f}s; opportunistic "
+            f"drain should be near-immediate (<<100ms), not near the "
+            f"{mgr._batch_window}s back-off window"
+        )
+
+    asyncio.run(run())
+
+
 def test_flusher_task_ref_cleared_after_drain():
     """On clean exit, ``_flusher_task`` should drop to None so the captured
     coroutine frame (and any ``batch_items`` it held) is collectable without

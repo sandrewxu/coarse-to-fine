@@ -278,11 +278,13 @@ class JointConfig(BaseModel):
     epochs: int = 12
     c2f_micro_batch_size: int = 32
     c2f_keep_last_n: int = 2
-    # Batching window (seconds) used by JointC2FRewardManager to coalesce
-    # concurrent per-sample run_single calls into one fwd+bwd+step on p_θ.
-    # 0.0 disables batching (falls back to per-sample update, legacy behaviour).
-    # Tune: larger → bigger batches (better MFU), more step latency.
-    c2f_batch_window: float = 0.05
+    # Back-off (seconds) between drains in the opportunistic flusher. The
+    # flusher drains immediately on each iteration; this window is the pause
+    # between drains, during which additional ``run_single`` calls enqueue.
+    # Keep small (tens of ms) so reward GPU work starts while vLLM is still
+    # generating, overlapping the two. Larger values increase batch size at
+    # the cost of reward-path latency and wasted vLLM-overlap time.
+    c2f_batch_window: float = 0.02
     # Call ``gc.collect()`` in the reward worker every N flushes to counter
     # slow CPU-side object accumulation under Ray's minimal-GC regime. 0
     # disables. ~tens of ms per collect on a multi-GB heap — negligible

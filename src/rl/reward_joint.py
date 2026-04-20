@@ -3,21 +3,27 @@
 Like :class:`C2FRewardManager` but ``p_θ`` is **trainable**. Concurrent
 ``run_single`` coroutines (spawned by veRL's agent_loop, one per rollout sample)
 enqueue their C2F inputs onto a shared queue. A single flusher coroutine
-coalesces the queue on a small time window and runs **one** batched
-forward+backward+optimizer step per flush, scoring all samples at the same
-``θ`` and taking one update on the averaged gradient. Validation samples
-(``is_validation == True``) are scored without a grad step.
+drains the queue **opportunistically** — processing whatever accumulated since
+the last drain — and runs a batched forward+backward+optimizer step on each
+drain. Samples in the same drain are scored at the same ``θ`` and contribute
+to one averaged-gradient update. Validation samples (``is_validation == True``)
+are scored without a grad step.
 
-Batching is controlled by ``rl.joint.c2f_batch_window`` (seconds). Set to
-``0.0`` to fall back to per-sample updates (legacy behaviour).
+Why opportunistic (vs. "wait-then-drain"): the reward path must overlap with
+ongoing vLLM generation, otherwise the reward GPU idles while vLLM is still
+producing samples and the step-latency floor becomes the batching window. The
+flusher drains immediately and uses ``rl.joint.c2f_batch_window`` only as a
+back-off *between* drains, which lets batches grow naturally while the prior
+batch's kernel is still running. This matches BentoML's adaptive batcher and
+Ray Serve's coalescing pattern.
 
 The math delta vs. per-sample updates:
   - REINFORCE gradient remains unbiased (rewards are ``.detach()``ed).
-  - Rewards have lower variance because all samples in a flush see the same
-    ``θ``, so the reward baseline is consistent.
-  - The p_θ trajectory differs: N AdamW steps at bs=1 ≠ 1 AdamW step at bs=N.
-    Functionally equivalent at small lr / long horizon; users may need to
-    re-sweep ``c2f_lr`` when switching from the legacy per-sample path.
+  - Rewards have lower variance because all samples in one drain see the same
+    ``θ`` — a consistent baseline per drain.
+  - The p_θ trajectory differs: N AdamW steps at bs=1 ≠ K AdamW steps at
+    bs=(N/K). Functionally equivalent at small lr / long horizon; users may
+    need to re-sweep ``c2f_lr`` when switching from the legacy per-sample path.
 """
 
 import asyncio
@@ -423,14 +429,27 @@ class JointC2FRewardManager(RewardManagerBase):
 
             del val_ids, val_labels, val_losses, val_loss_cpu
 
-    # Wait used for iterations *after* the first one — just enough to catch
-    # stragglers that arrived while we were processing and to detect
-    # quiescence before exiting. First iteration still uses the full
-    # ``c2f_batch_window`` to gather the bulk of the rollout.
-    _STRAGGLER_WINDOW_S: float = 0.1
+    # Number of consecutive empty drain attempts before the flusher exits.
+    # Two gives one full back-off window of quiescence before giving up, so
+    # a single late-arriving straggler still gets picked up.
+    _QUIESCENCE_EMPTY_TICKS: int = 2
 
     async def _flusher(self) -> None:
-        """Drain the queue in coalesced batches until empty, then exit.
+        """Opportunistic drain: process whatever's in the queue, then yield.
+
+        Design (and why it matters): the reward GPU must not idle while vLLM
+        is still generating. In the previous "sleep N seconds, then drain"
+        design, no reward work started until the window expired — inserting
+        a hard latency floor on every PPO step and erasing the natural
+        overlap between reward fwd/bwd/step and ongoing vLLM generation.
+
+        Here we drain immediately, process whatever accumulated, then sleep
+        ``c2f_batch_window`` as a *back-off between drains* (not before).
+        This matches the canonical async micro-batching pattern (BentoML's
+        adaptive batcher, Ray Serve's coalescing, etc.) — a future is
+        returned on enqueue, and a single background coroutine processes
+        items as they arrive, growing each batch opportunistically while a
+        prior batch's CUDA kernel is running.
 
         Invariant: at most one flusher is active at a time, tracked by
         ``_flusher_running`` under ``_queue_lock``. Exactly one of the
@@ -438,64 +457,62 @@ class JointC2FRewardManager(RewardManagerBase):
         owner; it spawns this task. Subsequent enqueues while the flusher is
         live just append and await their future.
 
-        Timing: first iteration sleeps ``c2f_batch_window`` to let a full
-        rollout's worth of samples accumulate. After each productive flush,
-        subsequent iterations sleep only ``_STRAGGLER_WINDOW_S`` so we exit
-        promptly once the rollout is drained, instead of burning another
-        ``c2f_batch_window`` on an empty check.
+        Exit: after ``_QUIESCENCE_EMPTY_TICKS`` consecutive drains that find
+        the queue empty, the flusher clears state and returns. The back-off
+        sleep between drains doubles as the straggler grace period, so one
+        empty tick isn't enough to stop — a sample that arrives mid-sleep
+        gets picked up on the next iteration.
         """
-        first_iteration = True
+        consecutive_empty = 0
         try:
             while True:
-                # Batching window: yield to let more concurrent ``run_single``
-                # calls enqueue before we drain. First iter covers the full
-                # rollout; later iters are just a straggler grace period.
-                await asyncio.sleep(
-                    self._batch_window if first_iteration else self._STRAGGLER_WINDOW_S
-                )
-                first_iteration = False
-
                 async with self._queue_lock:
                     batch_items = self._queue
                     self._queue = []
                     if not batch_items:
+                        consecutive_empty += 1
+                    else:
+                        consecutive_empty = 0
+
+                    if consecutive_empty >= self._QUIESCENCE_EMPTY_TICKS:
                         # Empty under the lock — safe to exit; any enqueue
                         # that lands after this point will see
                         # ``_flusher_running=False`` and spawn a new flusher.
                         self._flusher_running = False
-                        # Drop the coroutine-frame reference so captured
-                        # ``batch_items`` from prior iterations don't linger
-                        # until the next flush overwrites this slot.
                         self._flusher_task = None
                         return
 
-                try:
-                    self._process_batch(batch_items)
-                except Exception as exc:
-                    for it in batch_items:
-                        if not it["future"].done():
-                            it["future"].set_exception(exc)
-                    raise
-                finally:
-                    # Drop the local ref regardless — don't let the loop
-                    # iteration hold onto the processed items.
-                    del batch_items
+                if batch_items:
+                    try:
+                        self._process_batch(batch_items)
+                    except Exception as exc:
+                        for it in batch_items:
+                            if not it["future"].done():
+                                it["future"].set_exception(exc)
+                        raise
+                    finally:
+                        del batch_items
 
-                self._flush_count += 1
-                if self._gc_every > 0 and self._flush_count % self._gc_every == 0:
-                    # Force collection of reference cycles accumulated in
-                    # Ray's async worker. Safe: no tensors or futures live
-                    # across this call.
-                    gc.collect()
+                    self._flush_count += 1
+                    if self._gc_every > 0 and self._flush_count % self._gc_every == 0:
+                        # Force collection of reference cycles accumulated
+                        # in Ray's async worker. Safe: no tensors or futures
+                        # live across this call.
+                        gc.collect()
 
-                if _resource is not None:
-                    # ru_maxrss is bytes on Linux, KiB on macOS — fine as a
-                    # delta signal between flushes.
-                    log.debug(
-                        "[Joint] flush=%d rss_maxrss=%d",
-                        self._flush_count,
-                        _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss,
-                    )
+                    if _resource is not None:
+                        # ru_maxrss is bytes on Linux, KiB on macOS — fine
+                        # as a delta signal between flushes.
+                        log.debug(
+                            "[Joint] flush=%d rss_maxrss=%d",
+                            self._flush_count,
+                            _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss,
+                        )
+
+                # Back off briefly so other coroutines (including new
+                # ``run_single`` enqueues) can run. ``asyncio.sleep(0)``
+                # still yields even when the window is zero.
+                await asyncio.sleep(self._batch_window)
         except Exception:
             # Make sure nothing is left awaiting a future that will never
             # resolve — propagate the exception to any stranded items too.
