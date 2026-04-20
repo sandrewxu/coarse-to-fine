@@ -10,12 +10,15 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Andrew Xu", email = "andrew.xu@yale.edu" }]
+# Base deps are CPU-installable. GPU-only packages (flash-attn, vllm, verl,
+# liger-kernel) live under the per-step extras so CPU CI (`uv sync --extra dev`)
+# does not try to build CUDA wheels. flash-attn in particular imports torch at
+# build time without declaring it — under PEP 517 build isolation the build env
+# has no torch and the install fails.
 dependencies = [
     "cmake>=4.2.1",
     "datasets>=4.5.0",
-    "flash-attn>=2.8.3",
     "ipykernel>=7.2.0",
-    "liger-kernel>=0.7.0",
     "ninja>=1.13.0",
     "openai>=1.0",
     "pre-commit>=4.5.1",
@@ -27,28 +30,37 @@ dependencies = [
     "setuptools>=80.10.2",
     "setuptools-scm>=9.2.2",
     "transformers>=4.57.6",
-    "verl>=0.7.0",
-    # Lower bound matches the working install on Yale HPC (cluster build of
-    # vllm with FA2 / CUDA 12.8). Bump deliberately and rebuild.
-    "vllm==0.12.0",
     "wheel>=0.46.3",
 ]
 
 [project.optional-dependencies]
-# Step 4 — SFT with veRL: requires CUDA and veRL-compatible env
+# Step 4 — SFT q_φ with HuggingFace Trainer (no veRL).
 sft = [
-    "verl>=0.7.0",
+    "accelerate>=1.7.0",
+    "torch>=2.6.0",
 ]
-# Step 5 — local generation with vLLM
+# Step 5 — local generation with vLLM. vLLM bundles its own flash-attention
+# kernels, so a separate flash-attn install is not required here.
+# Pin matches the working install on Yale HPC (cluster build of vllm with
+# FA2 / CUDA 12.8). Bump deliberately and rebuild.
 generation = [
-    "vllm>=0.8.0",
+    "vllm==0.12.0",
 ]
-# Step 6 — C2F model pretraining with HF Trainer + FSDP
+# Step 6 — C2F model pretraining with HF Trainer + FSDP.
+# liger-kernel is currently unused (the `use_liger` config flag is not wired
+# through), but kept here so turning it on is a one-line change.
 c2f = [
-    "transformers>=4.52.0",
     "accelerate>=1.7.0",
     "torch>=2.6.0",
     "wandb",
+    "liger-kernel>=0.7.0",
+]
+# Step 7 — RL training with veRL. flash-attn is a soft dep for veRL's FSDP
+# actor/rollout; install with `--no-build-isolation` after torch is present
+# (flash-attn imports torch at build time without declaring it).
+rl = [
+    "verl>=0.7.0",
+    "flash-attn>=2.8.3",
 ]
 # Development tooling (lint, format, test). CPU-only; safe to install anywhere.
 # torch is needed for the unit-test suite (test_reward_common builds tensors).

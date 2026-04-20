@@ -29,9 +29,10 @@ make format      # ruff format . + ruff check --fix .
 make test        # pytest tests/
 
 # Per-step optional groups (GPU only):
-pip install -e ".[sft]"        # step 4 — veRL
+pip install -e ".[sft]"        # step 4 — HF Trainer (accelerate + torch)
 pip install -e ".[generation]" # step 5 — vLLM
-pip install -e ".[c2f]"        # step 6 — HF Trainer + FSDP
+pip install -e ".[c2f]"        # step 6 — HF Trainer + FSDP (+ liger-kernel)
+pip install -e ".[rl]"         # step 7 — veRL (+ flash-attn; needs --no-build-isolation)
 
 # Run a pipeline step:
 python scripts/0N_<name>.py --config config/latent_generation.yaml
