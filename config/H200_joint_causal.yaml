@@ -8,6 +8,7 @@ wandb:
 dataset:
   data_dir: "data/tinystoriesv2_shuffled"
   dataset_name: "tinystoriesv2"
+  rl_split: "tinystoriesv2.rl_subset_384k_chunk7.jsonl"
 
 sft:
   prompt_data: "data/prompt_data/gpt-5-nano-2025-08-07/docs_0000100000/gemini-3-pro-7/latent-generation/sft.jsonl"
@@ -31,7 +32,7 @@ rl:
     train_batch_size: 256
     ppo_micro_batch_size_per_gpu: 128
     c2f_micro_batch_size: 256
-
+    epochs: 1
 num_gpus: 1
 
 c2f_training:
@@ -45,7 +46,7 @@ c2f_training:
   mask_type: "causal"
   checkpoint_dir: "checkpoints/decoder_causal"
   tokenizer_dir: "checkpoints/tokenizer"
-  per_device_batch_size: 1024
+  per_device_batch_size: 512
   eval_batch_size: 2048
   gradient_accumulation_steps: 1
 
@@ -60,7 +61,7 @@ ar_training:
   head_dim: 64
   num_hidden_layers: 8
   checkpoint_dir: "checkpoints/ar_baseline"
-  per_device_batch_size: 1024
+  per_device_batch_size: 512
   eval_batch_size: 2048
   gradient_accumulation_steps: 1
 
@@ -75,6 +76,6 @@ diffusion_training:
   head_dim: 64
   num_hidden_layers: 8
   checkpoint_dir: "checkpoints/diffusion_baseline"
-  per_device_batch_size: 1024
+  per_device_batch_size: 512
   eval_batch_size: 2048
   gradient_accumulation_steps: 1

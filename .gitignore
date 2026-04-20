@@ -23,6 +23,7 @@ data/prompt_data/
 data/raw/
 data/tinystoriesv2_shuffled/
 data/rl_dataset/
+data/rl_dataset_small/
 data/tinystoriesv2
 
 # Model checkpoints

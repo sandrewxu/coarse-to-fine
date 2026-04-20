@@ -45,7 +45,7 @@ c2f_training:
   mask_type: "block"
   checkpoint_dir: "checkpoints/decoder_block"
   tokenizer_dir: "checkpoints/tokenizer"
-  per_device_batch_size: 1024
+  per_device_batch_size: 512
   eval_batch_size: 2048
   gradient_accumulation_steps: 1
 
@@ -60,7 +60,7 @@ ar_training:
   head_dim: 64
   num_hidden_layers: 8
   checkpoint_dir: "checkpoints/ar_baseline"
-  per_device_batch_size: 1024
+  per_device_batch_size: 512
   eval_batch_size: 2048
   gradient_accumulation_steps: 1
 
@@ -75,6 +75,6 @@ diffusion_training:
   head_dim: 64
   num_hidden_layers: 8
   checkpoint_dir: "checkpoints/diffusion_baseline"
-  per_device_batch_size: 1024
+  per_device_batch_size: 512
   eval_batch_size: 2048
   gradient_accumulation_steps: 1
