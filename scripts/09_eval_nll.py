@@ -52,7 +52,7 @@ def _print_summary(result: dict[str, Any]) -> None:
     mean = result["nats_per_word"]
     lo, hi = result["nats_per_word_ci95"]
     bits = mean / math.log(2)
-    ppl = math.exp(mean)
+    ppl = math.exp(mean) if mean < 700 else float("inf")
     log.info("=" * 60)
     log.info("  model_kind       = %s", result["model_kind"])
     log.info("  ckpt             = %s", result["ckpt"])
@@ -64,7 +64,7 @@ def _print_summary(result: dict[str, Any]) -> None:
         log.info("  MC samples N     = %d", result["N"])
     log.info("  num_docs         = %d", result["num_docs"])
     log.info("  total_tokens     = %d", result["total_tokens"])
-    log.info("  nats/word        = %.4f  (bits/word = %.4f, ppl = %.2f)", mean, bits, ppl)
+    log.info("  nats/word        = %.4f  (bits/word = %.4f, ppl = %.4g)", mean, bits, ppl)
     log.info("  95%% CI (nats/w)  = [%.4f, %.4f]", lo, hi)
     if "per_scale_nats_per_token" in result:
         log.info("  per-scale nats/token:")

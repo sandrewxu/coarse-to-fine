@@ -128,12 +128,15 @@ def eval_diffusion(
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+    from src.c2f_model.training.tokenizer import MASK_TOKEN
+
     tokenizer = load_space_tokenizer(config, tokenizer_dir)
-    mask_id = tokenizer.unk_token_id
+    mask_id = tokenizer.convert_tokens_to_ids(MASK_TOKEN)
     pad_id = tokenizer.pad_token_id
-    if mask_id is None:
+    if mask_id is None or mask_id == tokenizer.unk_token_id:
         raise RuntimeError(
-            "Tokenizer has no unk_token_id; MDLM eval requires [UNK] as the MASK index."
+            f"Tokenizer does not contain {MASK_TOKEN!r} as a distinct id; "
+            "retrain the tokenizer to match the diffusion training setup."
         )
 
     log.info("Loading diffusion model from %s...", ckpt)
