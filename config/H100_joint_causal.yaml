@@ -32,10 +32,6 @@ rl:
     train_batch_size: 128
     ppo_micro_batch_size_per_gpu: 16
     c2f_micro_batch_size: 128
-    # See H200_joint_causal.yaml: 0 = legacy per-sample (fastest on single GPU);
-    # positive values engage the opportunistic batcher.
-    c2f_batch_window: 0
-    c2f_gc_every: 50
 
 num_gpus: 1
 

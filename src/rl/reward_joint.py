@@ -1,46 +1,21 @@
 """Reward manager for joint ELBO training (posterior + decoder, simultaneous).
 
-Like :class:`C2FRewardManager` but ``p_θ`` is **trainable**. Concurrent
-``run_single`` coroutines (spawned by veRL's agent_loop, one per rollout sample)
-enqueue their C2F inputs onto a shared queue. A single flusher coroutine
-drains the queue **opportunistically** — processing whatever accumulated since
-the last drain — and runs a batched forward+backward+optimizer step on each
-drain. Samples in the same drain are scored at the same ``θ`` and contribute
-to one averaged-gradient update. Validation samples (``is_validation == True``)
-are scored without a grad step.
+Like :class:`C2FRewardManager` but ``p_θ`` is **trainable**: per rollout sample
+the manager computes ``reward = -CE_loss`` and takes a per-sample optimizer step
+on ``p_θ`` (scoring and training share one forward+backward). Validation calls
+(``data.meta_info['validate'] == True``) skip the optimizer step.
 
-Why opportunistic (vs. "wait-then-drain"): the reward path must overlap with
-ongoing vLLM generation, otherwise the reward GPU idles while vLLM is still
-producing samples and the step-latency floor becomes the batching window. The
-flusher drains immediately and uses ``rl.joint.c2f_batch_window`` only as a
-back-off *between* drains, which lets batches grow naturally while the prior
-batch's kernel is still running. This matches BentoML's adaptive batcher and
-Ray Serve's coalescing pattern.
-
-The math delta vs. per-sample updates:
-  - REINFORCE gradient remains unbiased (rewards are ``.detach()``ed).
-  - Rewards have lower variance because all samples in one drain see the same
-    ``θ`` — a consistent baseline per drain.
-  - The p_θ trajectory differs: N AdamW steps at bs=1 ≠ K AdamW steps at
-    bs=(N/K). Functionally equivalent at small lr / long horizon; users may
-    need to re-sweep ``c2f_lr`` when switching from the legacy per-sample path.
+All ``p_θ`` updates are serialised through ``self._c2f_lock`` so concurrent
+``run_single`` coroutines don't interleave CUDA ops on the shared model.
 """
 
 import asyncio
-import gc
 import os
 import shutil
 from pathlib import Path
 
 import torch
 from verl.experimental.reward_loop.reward_manager.base import RewardManagerBase
-
-try:
-    # Stdlib on POSIX; absent on Windows. Only used for a DEBUG-level RSS log
-    # per flush, so a missing module is a no-op rather than a failure.
-    import resource as _resource
-except ImportError:  # pragma: no cover - Windows path, not our target
-    _resource = None  # type: ignore[assignment]
 
 from src.common.logging import get_logger
 from src.rl.common import (
@@ -99,39 +74,14 @@ class JointC2FRewardManager(RewardManagerBase):
 
         self.optimizer = torch.optim.AdamW(c2f_model.parameters(), lr=c2f_lr, weight_decay=c2f_wd)
         self._step = 0
-        self._last_save_step = 0
 
-        # ── Dynamic batching state ─────────────────────────────────────────
-        # Concurrent ``run_single`` coroutines enqueue onto ``_queue`` and
-        # await a per-sample ``future``. One flusher coroutine drains the
-        # queue on a ``_batch_window``-second cadence and runs a single
-        # batched fwd+bwd+step, resolving all futures together.
-        self._batch_window: float = float(joint_cfg.get("c2f_batch_window", 0.05))
-        self._gc_every: int = int(joint_cfg.get("c2f_gc_every", 50))
-        self._queue: list[dict] = []
-        self._queue_lock = asyncio.Lock()
-        self._flusher_running: bool = False
-        self._flusher_task: asyncio.Task | None = None
-        self._flush_count: int = 0
-        # Legacy per-sample path, engaged when c2f_batch_window <= 0. A
-        # single asyncio.Lock serialises one fwd+bwd+step per sample with
-        # no queueing — matches the original pre-batching behaviour. Kept
-        # as an escape hatch because on single-GPU setups the opportunistic
-        # batcher can underperform the serialised path due to reward/vLLM
-        # CUDA-context contention.
-        self._legacy_lock = asyncio.Lock()
+        self._c2f_lock = asyncio.Lock()
 
-        mode = "legacy-per-sample" if self._batch_window <= 0 else "opportunistic-batched"
         log.info(
-            "JointC2FRewardManager ready. p trainable on %s, lr=%s, "
-            "malformed_reward=%s, batch_window=%ss, micro_bs=%d, gc_every=%d, mode=%s",
+            "JointC2FRewardManager ready. p trainable on %s, lr=%s, malformed_reward=%s",
             self.device,
             c2f_lr,
             self.malformed_reward,
-            self._batch_window,
-            self._micro_bs,
-            self._gc_every,
-            mode,
         )
 
     # ── Helpers ──────────────────────────────────────────────────────────────
@@ -276,30 +226,27 @@ class JointC2FRewardManager(RewardManagerBase):
         num_malformed = batch_size - num_valid
 
         # ── Phase 2: micro-batched forward + backward on p ─────────────────
-        # Accumulate grads per micro-batch (each scaled by 1/num_valid) so
-        # peak memory holds one micro-batch's activations, not all of them.
-        # Mathematically equivalent to a single ``.mean().backward()`` call
-        # over the full concatenated loss.
         per_sample_reward: torch.Tensor | None = None
-        avg_loss: float = 0.0
+        p_loss: torch.Tensor | None = None
         if num_valid > 0:
             batch_ids = torch.stack(all_input_ids).to(self.device)
             batch_labels = torch.stack(all_labels).to(self.device)
 
-            self.optimizer.zero_grad()
             all_per_sample_loss: list[torch.Tensor] = []
             for mb_start in range(0, num_valid, self._micro_bs):
                 mb_loss = self._ce_per_sample(
                     batch_ids[mb_start : mb_start + self._micro_bs],
                     batch_labels[mb_start : mb_start + self._micro_bs],
                 )
-                all_per_sample_loss.append(mb_loss.detach())
-                (mb_loss.sum() / num_valid).backward()
-            self.optimizer.step()
+                all_per_sample_loss.append(mb_loss)
 
             per_sample_loss = torch.cat(all_per_sample_loss)
-            per_sample_reward = -per_sample_loss.cpu()
-            avg_loss = per_sample_loss.mean().item()
+            per_sample_reward = -per_sample_loss.detach().cpu()
+
+            p_loss = per_sample_loss.mean()
+            self.optimizer.zero_grad()
+            p_loss.backward()
+            self.optimizer.step()
 
             pad_id = getattr(c.sft_tokenizer, "pad_token_id", None)
             for j, idx in enumerate(valid_indices):
@@ -329,6 +276,7 @@ class JointC2FRewardManager(RewardManagerBase):
         # ── Logging + checkpointing ────────────────────────────────────────
         self._step += 1
         avg_reward = per_sample_reward.mean().item() if per_sample_reward is not None else 0.0
+        avg_loss = p_loss.item() if p_loss is not None else 0.0
         log.info(
             "[Joint] step=%d valid=%d/%d p_loss=%.4f reward=%.4f",
             self._step,
@@ -337,205 +285,12 @@ class JointC2FRewardManager(RewardManagerBase):
             avg_loss,
             avg_reward,
         )
-        if self._step - self._last_save_step >= self._save_steps:
-            self._last_save_step = self._step
+        if self._step % self._save_steps == 0:
             self._save_checkpoint()
 
         if return_dict:
             return {"reward_tensor": reward_tensor}
         return data
-
-    # ── Dynamic batching: flusher + processor ───────────────────────────────
-
-    def _process_batch(self, batch_items: list[dict]) -> None:
-        """Run one batched fwd (+ bwd + step for training samples) on ``p_θ``.
-
-        Called from :meth:`_flusher` on the reward-worker event loop; the body
-        is synchronous CUDA work that blocks the loop while it runs. Resolves
-        each item's ``future`` with ``{"reward": float, "p_loss": float}``.
-
-        Train vs. validation samples are processed separately: training
-        samples contribute to a single gradient-accumulated optimizer step;
-        validation samples get a no-grad forward only. Validation output
-        doesn't update ``_step`` or trigger a checkpoint.
-        """
-        if not batch_items:
-            return
-
-        c = self.components
-        c2f_model = c.c2f_model
-
-        train_items = [it for it in batch_items if not it["is_validate"]]
-        val_items = [it for it in batch_items if it["is_validate"]]
-
-        # ── TRAIN path: one optimizer step on averaged gradient ──────────
-        if train_items:
-            c2f_model.train()
-            n_train = len(train_items)
-            train_ids = torch.stack([it["input_ids"] for it in train_items]).to(self.device)
-            train_labels = torch.stack([it["labels"] for it in train_items]).to(self.device)
-
-            self.optimizer.zero_grad()
-            train_losses: list[torch.Tensor] = []
-            # Gradient accumulation across micro-batches is equivalent to
-            # computing per_sample_loss.mean().backward() on the full batch
-            # (sum of per-sample grads scaled by 1/n_train), but caps peak
-            # activation memory to one micro-batch.
-            for mb_start in range(0, n_train, self._micro_bs):
-                mb_end = mb_start + self._micro_bs
-                mb_loss = self._ce_per_sample(
-                    train_ids[mb_start:mb_end],
-                    train_labels[mb_start:mb_end],
-                )
-                train_losses.append(mb_loss.detach())
-                (mb_loss.sum() / n_train).backward()
-            self.optimizer.step()
-
-            train_loss_cpu = torch.cat(train_losses).cpu()
-            for i, it in enumerate(train_items):
-                loss_i = float(train_loss_cpu[i].item())
-                if not it["future"].done():
-                    it["future"].set_result({"reward": -loss_i, "p_loss": loss_i})
-
-            self._step += n_train
-            avg_train_loss = float(train_loss_cpu.mean().item())
-            log.info(
-                "[Joint] step=%d train_batch=%d p_loss=%.4f reward=%.4f",
-                self._step,
-                n_train,
-                avg_train_loss,
-                -avg_train_loss,
-            )
-            if self._step - self._last_save_step >= self._save_steps:
-                self._last_save_step = self._step
-                self._save_checkpoint()
-
-            # Drop references to per-flush tensors so they're collectable
-            # immediately — closes any lifetime ambiguity that could keep the
-            # autograd graph or CPU loss tensor alive past ``step()``.
-            del train_ids, train_labels, train_losses, train_loss_cpu
-
-        # ── VALIDATION path: forward only, no grads, no optimizer step ────
-        if val_items:
-            c2f_model.eval()
-            n_val = len(val_items)
-            val_ids = torch.stack([it["input_ids"] for it in val_items]).to(self.device)
-            val_labels = torch.stack([it["labels"] for it in val_items]).to(self.device)
-
-            val_losses: list[torch.Tensor] = []
-            with torch.no_grad():
-                for mb_start in range(0, n_val, self._micro_bs):
-                    mb_end = mb_start + self._micro_bs
-                    val_losses.append(
-                        self._ce_per_sample(val_ids[mb_start:mb_end], val_labels[mb_start:mb_end])
-                    )
-
-            val_loss_cpu = torch.cat(val_losses).cpu()
-            for i, it in enumerate(val_items):
-                loss_i = float(val_loss_cpu[i].item())
-                if not it["future"].done():
-                    it["future"].set_result({"reward": -loss_i, "p_loss": loss_i})
-
-            del val_ids, val_labels, val_losses, val_loss_cpu
-
-    # Number of consecutive empty drain attempts before the flusher exits.
-    # Two gives one full back-off window of quiescence before giving up, so
-    # a single late-arriving straggler still gets picked up.
-    _QUIESCENCE_EMPTY_TICKS: int = 2
-
-    async def _flusher(self) -> None:
-        """Opportunistic drain: process whatever's in the queue, then yield.
-
-        Design (and why it matters): the reward GPU must not idle while vLLM
-        is still generating. In the previous "sleep N seconds, then drain"
-        design, no reward work started until the window expired — inserting
-        a hard latency floor on every PPO step and erasing the natural
-        overlap between reward fwd/bwd/step and ongoing vLLM generation.
-
-        Here we drain immediately, process whatever accumulated, then sleep
-        ``c2f_batch_window`` as a *back-off between drains* (not before).
-        This matches the canonical async micro-batching pattern (BentoML's
-        adaptive batcher, Ray Serve's coalescing, etc.) — a future is
-        returned on enqueue, and a single background coroutine processes
-        items as they arrive, growing each batch opportunistically while a
-        prior batch's CUDA kernel is running.
-
-        Invariant: at most one flusher is active at a time, tracked by
-        ``_flusher_running`` under ``_queue_lock``. Exactly one of the
-        ``run_single`` calls that found ``_flusher_running=False`` is the
-        owner; it spawns this task. Subsequent enqueues while the flusher is
-        live just append and await their future.
-
-        Exit: after ``_QUIESCENCE_EMPTY_TICKS`` consecutive drains that find
-        the queue empty, the flusher clears state and returns. The back-off
-        sleep between drains doubles as the straggler grace period, so one
-        empty tick isn't enough to stop — a sample that arrives mid-sleep
-        gets picked up on the next iteration.
-        """
-        consecutive_empty = 0
-        try:
-            while True:
-                async with self._queue_lock:
-                    batch_items = self._queue
-                    self._queue = []
-                    if not batch_items:
-                        consecutive_empty += 1
-                    else:
-                        consecutive_empty = 0
-
-                    if consecutive_empty >= self._QUIESCENCE_EMPTY_TICKS:
-                        # Empty under the lock — safe to exit; any enqueue
-                        # that lands after this point will see
-                        # ``_flusher_running=False`` and spawn a new flusher.
-                        self._flusher_running = False
-                        self._flusher_task = None
-                        return
-
-                if batch_items:
-                    try:
-                        self._process_batch(batch_items)
-                    except Exception as exc:
-                        for it in batch_items:
-                            if not it["future"].done():
-                                it["future"].set_exception(exc)
-                        raise
-                    finally:
-                        del batch_items
-
-                    self._flush_count += 1
-                    if self._gc_every > 0 and self._flush_count % self._gc_every == 0:
-                        # Force collection of reference cycles accumulated
-                        # in Ray's async worker. Safe: no tensors or futures
-                        # live across this call.
-                        gc.collect()
-
-                    if _resource is not None:
-                        # ru_maxrss is bytes on Linux, KiB on macOS — fine
-                        # as a delta signal between flushes.
-                        log.debug(
-                            "[Joint] flush=%d rss_maxrss=%d",
-                            self._flush_count,
-                            _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss,
-                        )
-
-                # Back off briefly so other coroutines (including new
-                # ``run_single`` enqueues) can run. ``asyncio.sleep(0)``
-                # still yields even when the window is zero.
-                await asyncio.sleep(self._batch_window)
-        except Exception:
-            # Make sure nothing is left awaiting a future that will never
-            # resolve — propagate the exception to any stranded items too.
-            async with self._queue_lock:
-                stranded = self._queue
-                self._queue = []
-                self._flusher_running = False
-                self._flusher_task = None
-            for it in stranded:
-                if not it["future"].done():
-                    it["future"].set_exception(
-                        RuntimeError("JointC2FRewardManager flusher crashed")
-                    )
-            raise
 
     async def run_single(self, data) -> dict:
         c = self.components
@@ -578,69 +333,28 @@ class JointC2FRewardManager(RewardManagerBase):
             }
 
         input_ids, labels = self._build_input(layer_contents, str(gt))
+        input_ids = input_ids.unsqueeze(0).to(self.device)
+        labels = labels.unsqueeze(0).to(self.device)
 
-        # ── Legacy per-sample escape hatch ────────────────────────────────
-        # When ``c2f_batch_window <= 0``, bypass the flusher entirely and do
-        # one fwd+bwd+step per sample under a global lock. This reproduces
-        # the pre-batching behaviour verbatim, as a safety valve for setups
-        # where the opportunistic batcher underperforms (single-GPU reward
-        # ↔ vLLM CUDA contention).
-        if self._batch_window <= 0:
-            input_ids_dev = input_ids.unsqueeze(0).to(self.device)
-            labels_dev = labels.unsqueeze(0).to(self.device)
-            async with self._legacy_lock:
-                self.components.c2f_model.train(mode=not is_validate)
-                with torch.set_grad_enabled(not is_validate):
-                    sample_loss = self._ce_per_sample(input_ids_dev, labels_dev).squeeze(0)
-                reward_val = -sample_loss.detach().cpu().item()
-                p_loss_val = float(sample_loss.detach().cpu().item())
-                if not is_validate:
-                    self.optimizer.zero_grad()
-                    sample_loss.backward()
-                    self.optimizer.step()
-                    self._step += 1
-                    if self._step - self._last_save_step >= self._save_steps:
-                        self._last_save_step = self._step
-                        self._save_checkpoint()
-            return {
-                "reward_score": float(reward_val),
-                "reward_extra_info": {
-                    "p_loss": p_loss_val,
-                    "malformed": 0.0,
-                    "validate": 1.0 if is_validate else 0.0,
-                },
-            }
+        async with self._c2f_lock:
+            c.c2f_model.train(mode=not is_validate)
+            with torch.set_grad_enabled(not is_validate):
+                sample_loss = self._ce_per_sample(input_ids, labels).squeeze(0)
 
-        # ── Batched path ──────────────────────────────────────────────────
-        # Stay on CPU until the flusher stacks + moves the batch — keeps
-        # peak GPU memory from scaling with in-flight ``run_single`` count.
+            reward = -sample_loss.detach().cpu().item()
 
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
-        async with self._queue_lock:
-            self._queue.append(
-                {
-                    "input_ids": input_ids,
-                    "labels": labels,
-                    "is_validate": is_validate,
-                    "future": future,
-                }
-            )
-            start_flusher = not self._flusher_running
-            if start_flusher:
-                self._flusher_running = True
+            if not is_validate:
+                self.optimizer.zero_grad()
+                sample_loss.backward()
+                self.optimizer.step()
+                self._step += 1
+                if self._step % self._save_steps == 0:
+                    self._save_checkpoint()
 
-        if start_flusher:
-            # Hold a reference so the task isn't GC'd mid-flight. A previous
-            # flusher may still hold this slot briefly after clearing
-            # ``_flusher_running``; overwriting is safe since finished tasks
-            # don't need to be awaited.
-            self._flusher_task = asyncio.create_task(self._flusher())
-
-        result = await future
         return {
-            "reward_score": float(result["reward"]),
+            "reward_score": float(reward),
             "reward_extra_info": {
-                "p_loss": float(result["p_loss"]),
+                "p_loss": float(sample_loss.detach().cpu().item()),
                 "malformed": 0.0,
                 "validate": 1.0 if is_validate else 0.0,
             },

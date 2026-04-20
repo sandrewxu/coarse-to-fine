@@ -290,18 +290,6 @@ class JointConfig(BaseModel):
     rollout_gpu_memory_utilization: float = 0.6
     rollout_max_num_seqs: int = 256
     rollout_max_num_batched_tokens: int = 32768
-    # Back-off (seconds) between drains in the opportunistic flusher. The
-    # flusher drains immediately on each iteration; this window is the pause
-    # between drains, during which additional ``run_single`` calls enqueue.
-    # Keep small (tens of ms) so reward GPU work starts while vLLM is still
-    # generating, overlapping the two. Larger values increase batch size at
-    # the cost of reward-path latency and wasted vLLM-overlap time.
-    c2f_batch_window: float = 0.02
-    # Call ``gc.collect()`` in the reward worker every N flushes to counter
-    # slow CPU-side object accumulation under Ray's minimal-GC regime. 0
-    # disables. ~tens of ms per collect on a multi-GB heap — negligible
-    # relative to the flush's CUDA work.
-    c2f_gc_every: int = 50
 
 
 class RlConfig(BaseModel):
