@@ -255,3 +255,129 @@ def _parse_sft_response(response: str) -> list[str]:
         if match:
             contents.append(match.group(1).strip())
     return contents
+
+
+class ARDataset(TorchDataset):
+    """Text-only dataset for the no-latents AR baseline.
+
+    Reads the same parquet as :class:`C2FDataset` but emits a sequence of
+    ``[BOS, w_0, ..., w_{N-1}]`` (length ``text_word_count + 1``) consisting
+    only of the document's text tokens. Latents are dropped.
+
+    Labels mirror ``input_ids`` with padding masked to ``-100``; the model's
+    standard shifted-CE loss head consumes them. Used by
+    ``scripts/06b_train_ar_baseline.py``.
+    """
+
+    VALID_FORMATS = ("c2f", "sft")
+
+    def __init__(
+        self,
+        data_dir: str | Path,
+        scale_lengths: list[int] | None = None,
+        text_word_count: int = 32,
+        parquet_filename: str | None = None,
+        dataset_format: str = "c2f",
+        tokenizer: PreTrainedTokenizerBase | None = None,
+    ) -> None:
+        """
+        Args:
+            data_dir: Directory containing the training parquet.
+            scale_lengths: Same list as C2FDataset uses, only ``scale_lengths[-1]``
+                (the text scale) is read; ignored otherwise. Accepted for
+                config-call symmetry with C2FDataset.
+            text_word_count: Words per document (overridden by
+                ``scale_lengths[-1]`` when both are provided).
+            parquet_filename: Defaults to ``"c2f_train.parquet"`` for ``"c2f"``
+                format, ``"train.parquet"`` for ``"sft"`` format.
+            dataset_format: ``"c2f"`` (single ``text`` column with concatenated
+                latents+text) or ``"sft"`` (``prompt`` column has the raw doc).
+            tokenizer: Pre-built space tokenizer.
+        """
+        if dataset_format not in self.VALID_FORMATS:
+            raise ValueError(
+                f"dataset_format must be one of {self.VALID_FORMATS}, got {dataset_format!r}"
+            )
+        if tokenizer is None:
+            raise ValueError("ARDataset requires a pre-built tokenizer (the space tokenizer).")
+
+        self.dataset_format = dataset_format
+        self.tokenizer = tokenizer
+        if scale_lengths is not None:
+            text_word_count = scale_lengths[-1]
+        self.text_word_count = text_word_count
+        # Sequence layout: [BOS, w_0, ..., w_{N-1}] -> N+1 positions.
+        self.seq_len = text_word_count + 1
+
+        if parquet_filename is None:
+            parquet_filename = "c2f_train.parquet" if dataset_format == "c2f" else "train.parquet"
+
+        data_dir = Path(data_dir)
+        parquet_path = data_dir / parquet_filename
+        self.dataset = load_dataset("parquet", data_files=str(parquet_path), split="train")
+
+        self.bos_id = self.tokenizer.bos_token_id
+        if self.bos_id is None:
+            self.bos_id = self.tokenizer.eos_token_id
+        self.pad_id = self.tokenizer.pad_token_id
+        if self.pad_id is None:
+            self.pad_id = self.tokenizer.eos_token_id
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def _row_to_text(self, row: dict) -> str:
+        """Extract the original document text (no latents) from a row."""
+        if self.dataset_format == "sft":
+            return row["prompt"]
+        # c2f format: ``text`` column has [latent words, text words] concatenated.
+        # The last text_word_count words are the original document.
+        words = row["text"].split()
+        return " ".join(words[-self.text_word_count :])
+
+    def _encode_row(self, row: dict) -> dict[str, torch.Tensor]:
+        """Tokenize one row into ``{input_ids, labels}`` tensors."""
+        text = self._row_to_text(row)
+        encoded = self.tokenizer.encode(text, add_special_tokens=False)
+        if len(encoded) >= self.text_word_count:
+            encoded = encoded[: self.text_word_count]
+            content_words = self.text_word_count
+        else:
+            content_words = len(encoded)
+            encoded = encoded + [self.pad_id] * (self.text_word_count - content_words)
+
+        tokens = [self.bos_id, *encoded]
+        input_ids = torch.tensor(tokens, dtype=torch.long)
+
+        # labels[i] is the target for the token at position i in shifted-CE
+        # (logits[:-1] predicts labels[1:]). Mask the padding region from loss.
+        labels = input_ids.clone()
+        content_end = 1 + content_words
+        if content_end < self.seq_len:
+            labels[content_end:] = -100
+        return {"input_ids": input_ids, "labels": labels}
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        return self._encode_row(self.dataset[idx])
+
+    def train_test_split(self, test_size: float = 0.05, seed: int = 42) -> dict[str, "ARDataset"]:
+        """Same 95/5 deterministic split as C2FDataset (use the same seed for parity)."""
+        split = self.dataset.train_test_split(test_size=test_size, seed=seed)
+        return {
+            "train": _ARDatasetView(self, split["train"]),
+            "test": _ARDatasetView(self, split["test"]),
+        }
+
+
+class _ARDatasetView(TorchDataset):
+    """View over an ARDataset with a different underlying HF dataset split."""
+
+    def __init__(self, parent: ARDataset, hf_dataset) -> None:
+        self.parent = parent
+        self.dataset = hf_dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        return self.parent._encode_row(self.dataset[idx])
