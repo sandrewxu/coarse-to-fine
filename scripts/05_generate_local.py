@@ -36,7 +36,6 @@ from src.common.paths import PROJECT_ROOT
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate latent outputs from SFT model")
-    # Data source: --chunks (from dataset config) or --data (explicit parquet)
     data_group = parser.add_mutually_exclusive_group()
     data_group.add_argument(
         "--chunks",
@@ -75,7 +74,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Load config for defaults (or use empty)
     config = {}
     gen_config = {}
     dataset_config = {}
@@ -90,20 +88,16 @@ def main() -> int:
         dataset_config = config.get("dataset", {})
         setup_wandb(config, step_name="generation")
 
-    # Resolve model path
     model_path = args.model or gen_config.get("model_path", "")
     if not model_path:
         log.error("--model is required (or set generation.model_path in config)")
         return 1
 
-    # Resolve output dir
     output_dir = args.output_dir or Path(gen_config.get("output_dir", "data/local_generations"))
     if not output_dir.is_absolute():
         output_dir = PROJECT_ROOT / output_dir
 
-    # Load prompts from chunks or parquet
     if args.data is not None:
-        # Backward compat: load from parquet
         if not args.data.exists():
             log.error(f"Data file not found: {args.data}")
             return 1
@@ -112,7 +106,6 @@ def main() -> int:
         log.info(f"Loading prompts from {args.data}...")
         prompts = load_prompts(args.data)
     else:
-        # Load from chunk files
         chunk_indices = args.chunks or gen_config.get("chunks", [0, 1, 2, 3])
         data_dir = dataset_config.get("data_dir", "data/tinystoriesv2_shuffled")
         dataset_name = dataset_config.get("dataset_name", "tinystoriesv2")
@@ -123,7 +116,6 @@ def main() -> int:
 
         chunk_paths = resolve_chunk_paths(data_dir, dataset_name, chunk_indices)
 
-        # Verify all chunk files exist
         for p in chunk_paths:
             if not p.exists():
                 log.error(f"Chunk file not found: {p}")
@@ -136,7 +128,6 @@ def main() -> int:
         prompts = prompts[: args.num_samples]
     log.info(f"  {len(prompts)} prompts loaded")
 
-    # Build sampling kwargs from config defaults, CLI overrides take priority
     sampling_kwargs = {
         "temperature": gen_config.get("temperature", 0.7),
         "top_p": gen_config.get("top_p", 0.9),
@@ -151,20 +142,17 @@ def main() -> int:
         sampling_kwargs["max_new_tokens"] = gen_config.get("max_tokens", 256)
         sampling_kwargs["top_k"] = gen_config.get("top_k", 50)
 
-    # Generate
     from src.generation.inference import generate
 
     log.info(f"Generating with {args.backend} backend ({len(prompts)} prompts)...")
     outputs = generate(args.backend, model_path, prompts, **sampling_kwargs)
     log.info(f"  Generated {len(outputs)} outputs")
 
-    # Save raw outputs
     from src.generation.dataset import save_generation_outputs
 
     raw_path = save_generation_outputs(prompts, outputs, output_dir)
     log.info(f"  Raw generations saved to: {raw_path}")
 
-    # Verify and flatten (if config provided with word_count_constraints)
     if config.get("word_count_constraints"):
         from src.generation.dataset import flatten_for_c2f, verify_and_filter_outputs
 

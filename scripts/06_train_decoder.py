@@ -59,7 +59,6 @@ def detect_dataset_format(parquet_path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train C2F decoder model")
-    # Essential inputs
     parser.add_argument("--data", required=True, type=Path, help="Training parquet file")
     parser.add_argument(
         "--init-from",
@@ -73,7 +72,6 @@ def main() -> int:
     parser.add_argument(
         "--resume-from", type=str, default=None, help="Resume from checkpoint directory"
     )
-    # Training overrides
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
     parser.add_argument(
@@ -95,7 +93,6 @@ def main() -> int:
         log.error(f"Data file not found: {args.data}")
         return 1
 
-    # Load config for defaults (or use empty)
     config = {"scale_lengths": [2, 4, 8, 16, 32], "c2f_training": {}}
     wandb_enabled = False
 
@@ -108,14 +105,12 @@ def main() -> int:
 
         load_env()
         config = load_config(args.config)
-        # Include mask_type ("block" / "causal") in the wandb run name so the
-        # two variants are easy to A/B in the dashboard.
+        # Include mask_type in the run name so block/causal are easy to A/B in W&B.
         mask_type = config.get("c2f_training", {}).get("mask_type", "block")
         wandb_enabled = setup_wandb(config, step_name=f"c2f-pretrain-{mask_type}")
 
     c2f_cfg = config["c2f_training"]
 
-    # CLI overrides
     if args.init_from is not None:
         c2f_cfg["init_from"] = args.init_from
     if args.epochs is not None:
@@ -129,14 +124,12 @@ def main() -> int:
     if args.mask_type is not None:
         c2f_cfg["mask_type"] = args.mask_type
 
-    # Detect dataset format and resolve paths
     data_path = args.data.resolve()
     dataset_dir = data_path.parent
     parquet_filename = data_path.name
     dataset_format = detect_dataset_format(data_path)
     log.info(f"Dataset: {data_path} (format={dataset_format})")
 
-    # Tokenizer
     from src.c2f_model.training.dataset import C2FDataset
     from src.c2f_model.training.train import C2FTrainer, build_training_args, load_c2f_model
 
@@ -159,7 +152,6 @@ def main() -> int:
         vocab_size = tokenizer.vocab_size
         log.info(f"  Space tokenizer ready (vocab_size={vocab_size})")
 
-    # Init W&B (main process only)
     wandb_run = None
     if wandb_enabled and os.environ.get("LOCAL_RANK", "0") == "0":
         import wandb
@@ -173,13 +165,11 @@ def main() -> int:
             },
         )
 
-    # Load model
     log.info(f"Loading C2F model (init_from={c2f_cfg.get('init_from', 'random')})...")
     model = load_c2f_model(config, vocab_size=vocab_size)
     param_count = sum(p.numel() for p in model.parameters())
     log.info(f"  Parameters: {param_count:,}")
 
-    # Build dataset
     log.info("Building dataset...")
     full_dataset = C2FDataset(
         data_dir=str(dataset_dir),
@@ -192,12 +182,10 @@ def main() -> int:
         tokenizer=tokenizer,
     )
 
-    # Split
     eval_split = c2f_cfg.get("eval_split", 0.05)
     splits = full_dataset.train_test_split(test_size=eval_split, seed=c2f_cfg.get("seed", 42))
     log.info(f"  Train: {len(splits['train'])}, Eval: {len(splits['test'])}")
 
-    # Train
     training_args = build_training_args(config, PROJECT_ROOT, wandb_enabled=wandb_enabled)
     trainer = C2FTrainer(
         model=model,

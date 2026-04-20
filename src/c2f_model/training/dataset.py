@@ -101,20 +101,16 @@ class C2FDataset(TorchDataset):
         self.scale_lengths = scale_lengths
         self.seq_len = 2 ** math.ceil(math.log2(1 + sum(scale_lengths)))
 
-        # Build word count boundaries for splitting
-        # Order matches scale_lengths: z_4, z_3, z_2, z_1, text
         layer_names = ["z_4", "z_3", "z_2", "z_1"]
         self.word_counts = [word_count_constraints[n] for n in layer_names]
         self.word_counts.append(text_word_count)
 
-        # Compute cumulative word boundaries
         self.word_boundaries = []
         pos = 0
         for wc in self.word_counts:
             self.word_boundaries.append((pos, pos + wc))
             pos += wc
 
-        # Resolve default parquet filename based on format
         if parquet_filename is None:
             parquet_filename = "c2f_train.parquet" if dataset_format == "c2f" else "train.parquet"
 
@@ -122,14 +118,9 @@ class C2FDataset(TorchDataset):
         parquet_path = data_dir / parquet_filename
         self.dataset = load_dataset("parquet", data_files=str(parquet_path), split="train")
 
-        # Token IDs
-        self.bos_id = self.tokenizer.bos_token_id
-        if self.bos_id is None:
-            # Qwen3 may not have an explicit BOS; use eos as fallback
-            self.bos_id = self.tokenizer.eos_token_id
-        self.pad_id = self.tokenizer.pad_token_id
-        if self.pad_id is None:
-            self.pad_id = self.tokenizer.eos_token_id
+        # Qwen3 has no explicit BOS; use eos as fallback.
+        self.bos_id = self.tokenizer.bos_token_id or self.tokenizer.eos_token_id
+        self.pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -151,57 +142,33 @@ class C2FDataset(TorchDataset):
         return {"input_ids": input_ids, "labels": labels}
 
     def _build_token_sequence(self, words: list[str]) -> torch.LongTensor:
-        """
-        Tokenize per-scale word segments and assemble the fixed-layout sequence.
-
-        Returns:
-            Tensor of shape [seq_len].
-        """
+        """Tokenize per-scale word segments and assemble the fixed-layout sequence."""
         tokens = [self.bos_id]
 
-        for _k, ((start, end), length) in enumerate(
-            zip(self.word_boundaries, self.scale_lengths, strict=False)
+        for (start, end), length in zip(
+            self.word_boundaries, self.scale_lengths, strict=False
         ):
-            segment_words = words[start:end]
-            segment_text = " ".join(segment_words)
-
+            segment_text = " ".join(words[start:end])
             encoded = self.tokenizer.encode(segment_text, add_special_tokens=False)
-
-            # Truncate or pad to exactly `length` tokens
             if len(encoded) >= length:
                 encoded = encoded[:length]
             else:
                 encoded = encoded + [self.pad_id] * (length - len(encoded))
-
             tokens.extend(encoded)
 
-        # Pad to seq_len
         while len(tokens) < self.seq_len:
             tokens.append(self.pad_id)
 
         return torch.tensor(tokens[: self.seq_len], dtype=torch.long)
 
     def _build_labels(self, input_ids: torch.LongTensor) -> torch.LongTensor:
-        """
-        Build labels for unshifted cross-entropy loss.
-
-        labels[i] = input_ids[i] for content positions, -100 for BOS and padding.
-        The C2FForCausalLM forward uses unshifted loss: logits[i] predicts labels[i].
-
-        Returns:
-            Tensor of shape [seq_len].
-        """
+        """Labels for unshifted cross-entropy: -100 at BOS and post-content padding."""
         labels = input_ids.clone()
-
-        # Mask BOS position
         labels[0] = -100
-
-        # Mask padding positions (everything beyond the content region).
-        # Use position-based masking, not token-ID-based, to avoid
-        # accidentally masking content tokens whose ID equals pad_id.
-        content_len = 1 + sum(self.scale_lengths)  # BOS + all scales
+        # Position-based (not token-id based): real content tokens whose id
+        # happens to equal pad_id must still be scored.
+        content_len = 1 + sum(self.scale_lengths)
         labels[content_len:] = -100
-
         return labels
 
     def train_test_split(self, test_size: float = 0.05, seed: int = 42) -> dict[str, "C2FDataset"]:

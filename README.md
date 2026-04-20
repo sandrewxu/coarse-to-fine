@@ -16,6 +16,27 @@ make test                                 # smoke check the unit suite
 For the full pipeline, jump to [Running the Pipeline](#running-the-pipeline).
 For agent / Claude Code orientation, see [`CLAUDE.md`](./CLAUDE.md).
 
+## Current status
+
+The core algorithm is implemented end-to-end (steps 0–9) and two baselines are
+trained with matched architecture for fair comparison:
+
+- **C2F decoder** (`scripts/06_train_decoder.py`) — supports both `block` and
+  `causal` masks.
+- **AR baseline** (`scripts/06b_train_ar_baseline.py`) — stock
+  `Qwen3ForCausalLM` on text only, same space tokenizer + 95/5 split.
+- **MDLM diffusion baseline** (`scripts/06c_train_diffusion_baseline.py`) —
+  continuous-time SUBS masked-diffusion head on the same backbone.
+- **Joint ELBO training** (`scripts/07_rl_train.py --phase joint`) — RL
+  posterior and online MLE decoder updates in a single veRL reward loop.
+- **Unified NLL evaluator** (`scripts/09_eval_nll.py`) — exact AR NLL, C2F
+  IWAE-1 ELBO, C2F ELBO upper bound via the SFT posterior, and MDLM MC-NELBO,
+  all reported in matched nats/word with bootstrap 95 % CI.
+
+HPC configs for H100 (80 GB) and H200 (141 GB) live alongside the base YAML in
+`config/`; both mask variants (`block`, `causal`) are supported in the joint
+phase via `rl.joint.c2f_mask_type`.
+
 ---
 
 ## Table of Contents
@@ -266,6 +287,16 @@ Step 6   scripts/06_train_decoder.py
   Supports --mask-type block (default) or causal
   → checkpoints/decoder/
 
+Step 6b  scripts/06b_train_ar_baseline.py
+  No-latents AR baseline (stock Qwen3ForCausalLM). Matches c2f_training's
+  architecture, tokenizer, and 95/5 split for apples-to-apples NLL.
+  → checkpoints/ar_baseline/
+
+Step 6c  scripts/06c_train_diffusion_baseline.py
+  MDLM continuous-time SUBS masked-diffusion baseline. Same Qwen3 backbone,
+  same space tokenizer ([MASK] is a dedicated reserved id).
+  → checkpoints/diffusion_baseline/
+
 Step 7   scripts/07_rl_train.py
   ELBO optimisation on RL split — alternating GRPO + supervised
   Phase A (sft):    GRPO on q_φ, p_θ frozen              → checkpoints/rl/sft/
@@ -277,8 +308,13 @@ Step 8   scripts/08_eval_joint.py
   mode and report unique-token ratio + top-5 most common z tokens.
 
 Step 9   scripts/09_eval_nll.py
-  Unified NLL evaluator (AR exact CE / C2F IWAE-K ELBO bound / diffusion
-  stub). Reports nats/word + bootstrap 95 % CI; for C2F, per-scale loss.
+  Unified NLL evaluator. Four code paths under one CLI, all reporting
+  nats/word + bootstrap 95 % CI:
+    ar         exact shifted-CE NLL on raw text
+    c2f        IWAE-1 ELBO lower bound with gold z from the parquet
+    c2f_bound  ELBO upper bound on -log p(x)/T via the SFT model as q_φ
+               (enabled with --sft-ckpt; directly comparable to AR)
+    diffusion  MC-NELBO (N samples of t, mask) — matches the 06c training loss
 ```
 
 | Step | Script | Required args | Key inputs | Output |
@@ -290,6 +326,8 @@ Step 9   scripts/09_eval_nll.py
 | 4 | `04_sft_train.py` | `--data` | `train.parquet` (batch API data) | `checkpoints/sft/` |
 | 5 | `05_generate_local.py` | `--chunks`, `--config` | Chunk JSONL files, SFT checkpoint | `data/local_generations/c2f_train.parquet` |
 | 6 | `06_train_decoder.py` | `--data` | `c2f_train.parquet` (step 5 output) | `checkpoints/decoder/` |
+| 6b | `06b_train_ar_baseline.py` | `--data` | `c2f_train.parquet` (shared with step 6) | `checkpoints/ar_baseline/` |
+| 6c | `06c_train_diffusion_baseline.py` | `--data` | `c2f_train.parquet` (shared with step 6) | `checkpoints/diffusion_baseline/` |
 | 7 | `07_rl_train.py` | `--phase`, `--config` | SFT + C2F checkpoints, RL split | `checkpoints/rl/{sft,c2f,joint}/` |
 | 8 | `08_eval_joint.py` | `--checkpoint` | C2F checkpoint | Posterior-collapse diagnostics (stdout) |
 | 9 | `09_eval_nll.py` | `--model-kind`, `--ckpt`, `--test` | Checkpoint + held-out data | Aggregate nats/word + per-scale breakdown |
@@ -308,9 +346,10 @@ Step 9   scripts/09_eval_nll.py
 Each pipeline step has its own optional dependency group to avoid unnecessary installs:
 
 ```bash
-pip install -e ".[sft]"        # Step 4 — veRL (used only in step 7A GRPO)
-pip install -e ".[generation]" # Step 5 — vLLM generation
-pip install -e ".[c2f]"        # Step 6 — C2F pretraining
+pip install -e ".[sft]"        # Step 4 — HF Trainer (accelerate + torch) for q_φ SFT
+pip install -e ".[generation]" # Step 5 — vLLM inference for q_φ sampling
+pip install -e ".[c2f]"        # Steps 6 / 6b / 6c — HF Trainer + FSDP (+ liger-kernel)
+pip install -e ".[rl]"         # Step 7 — veRL (+ flash-attn; needs --no-build-isolation)
 pip install -e ".[dev]"        # Ruff, pytest, pre-commit, nbstripout, CPU torch (for unit tests)
 ```
 
@@ -580,6 +619,56 @@ SLURM: `scripts/slurm_06_pretrain.sh`.
 
 ---
 
+### Step 6b — AR Baseline (no latents)
+
+Stock `Qwen3ForCausalLM` trained on the **same parquet** as step 6 but reading
+only the document text. Architecture overrides live under `ar_training:` in the
+YAML and match `c2f_training:` so `09_eval_nll.py` can compare nats/word
+directly.
+
+```bash
+python scripts/06b_train_ar_baseline.py \
+  --data data/local_generations/c2f_train.parquet \
+  --config config/latent_generation.yaml
+
+# Multi-GPU with FSDP:
+accelerate launch --num_processes=4 scripts/06b_train_ar_baseline.py \
+  --data data/local_generations/c2f_train.parquet \
+  --config config/latent_generation.yaml
+```
+
+The space tokenizer (produced by step 6) is reused for vocabulary parity; the
+tokenizer is saved alongside the AR checkpoint.
+
+SLURM: `scripts/slurm_06b_ar_baseline.sh`.
+
+---
+
+### Step 6c — MDLM Diffusion Baseline
+
+Continuous-time SUBS masked-diffusion head (Sahoo et al. 2024) on the same
+Qwen3 backbone, same parquet, same space tokenizer. The tokenizer reserves a
+dedicated `[MASK]` token so `x0 == mask_id` is impossible by construction and
+vocab parity with AR / C2F is preserved.
+
+```bash
+python scripts/06c_train_diffusion_baseline.py \
+  --data data/local_generations/c2f_train.parquet \
+  --config config/H100_joint_causal.yaml
+
+accelerate launch --num_processes=4 scripts/06c_train_diffusion_baseline.py \
+  --data data/local_generations/c2f_train.parquet \
+  --config config/H100_joint_causal.yaml
+```
+
+Math lives in `src/c2f_model/training/diffusion.py`; the same `mdlm_loss`
+function powers the training step and the evaluator in `src/eval/diffusion.py`,
+so training and eval cannot drift.
+
+SLURM: `scripts/slurm_06c_diffusion_baseline.sh`.
+
+---
+
 ### Step 7 — ELBO Optimisation
 
 Alternates Phase A (GRPO on $q_\phi$) and Phase B (supervised on $p_\theta$), using the **RL split** (`dataset.rl_split`) as the document pool — a separate held-out set from the data used in steps 5–6. Each phase can be run independently or both sequentially.
@@ -631,27 +720,40 @@ Output (stdout): total $z$ tokens generated, unique-token count and ratio, top-5
 
 ### Step 9 — Unified NLL Evaluation
 
-Scores a checkpoint on held-out data under a fixed tokenization, reporting nats/word with a bootstrap 95 % CI. Supports three model kinds:
+Scores a checkpoint on held-out data under a fixed tokenization, reporting nats/word with a bootstrap 95 % CI. The script aborts on a `vocab_size` mismatch between the model and the repo's space tokenizer so cross-model comparisons cannot be silently corrupted.
 
-- `ar` — standard autoregressive LM; exact $-\log p(x)$ via shifted CE on raw text.
-- `c2f` — `C2FForCausalLM`; ELBO (IWAE-1 with gold $z$ from the test parquet) plus per-scale nats/token for `z_4, z_3, z_2, z_1, text`. `--K > 1` is reserved for a later pass that will sample multiple $z$ from $q_\phi$.
-- `diffusion` — stub for the forthcoming discrete-diffusion baseline.
+- `ar` — exact $-\log p(x)$ via shifted CE on raw text. Documents are right-padded and scored in parallel; pad targets are ignored.
+- `c2f` — `C2FForCausalLM` training objective as an IWAE-1 lower bound on $\log p(x)$ using gold $z$ read from the test parquet. Reports per-scale nats/token (`z_4, z_3, z_2, z_1, text`) alongside the aggregate.
+- `c2f` + `--sft-ckpt` — switches to the **ELBO upper bound** on $-\log p(x) / T$ (`c2f_bound` path). Uses the SFT model as $q_\phi$ to score $\log q(z \mid x)$ and combines with $\log p_\theta(x, z)$; directly comparable to the AR baseline's exact NLL.
+- `diffusion` — Monte-Carlo NELBO for the MDLM baseline. Draws `N` samples of $(t, \text{mask})$ per doc and averages the per-position weighted CE. MC draws are packed along the batch dim via `--mc-batch-size` so effective batch is `--batch-size × --mc-batch-size`.
 
 ```bash
 # AR baseline on raw 32-word documents:
 python scripts/09_eval_nll.py \
-  --model-kind ar --ckpt checkpoints/ar/ \
+  --model-kind ar --ckpt checkpoints/ar_baseline/ \
   --test data/tinystoriesv2_shuffled/tinystoriesv2.test.jsonl \
   --limit 2000
 
-# C2F ELBO on a parquet that contains gold latents + text (step-5 format):
+# C2F ELBO lower bound on a c2f-format parquet with gold latents + text:
 python scripts/09_eval_nll.py \
   --model-kind c2f --ckpt checkpoints/decoder/ \
   --test data/local_generations/c2f_test.parquet \
   --K 1 --out-jsonl results/decoder.per_doc.jsonl
+
+# C2F ELBO upper bound (directly comparable to AR nats/word):
+python scripts/09_eval_nll.py \
+  --model-kind c2f --ckpt checkpoints/decoder/ \
+  --sft-ckpt checkpoints/sft/checkpoint-1172 \
+  --test data/local_generations/c2f_test.parquet
+
+# MDLM MC-NELBO (N samples per doc):
+python scripts/09_eval_nll.py \
+  --model-kind diffusion --ckpt checkpoints/diffusion_baseline/ \
+  --test data/tinystoriesv2_shuffled/tinystoriesv2.test.jsonl \
+  --N 128 --mc-batch-size 16
 ```
 
-The script aborts on a `vocab_size` mismatch between the model and the repo's space tokenizer so cross-model comparisons cannot be silently corrupted.
+Passing the same step-5 parquet to `ar` (via `--test` and a text-only view), `c2f`, and `c2f_bound` gives an apples-to-apples comparison on the shared held-out subset.
 
 ---
 
@@ -660,6 +762,12 @@ The script aborts on a `vocab_size` mismatch between the model and the repo's sp
 All defaults are defined in `src/config.py` (Pydantic schema). The YAML file only needs to specify overrides. Derived fields (`word_count_constraints`, `text_word_count`) are computed automatically from `scale_lengths`. Top-level `num_gpus` and `seed` propagate to all sections.
 
 Scripts 04, 05, and 06 work without a config file (using built-in defaults); scripts 00, 01, 03, and 07 require or benefit from `--config`.
+
+Ready-to-run configs live under `config/`:
+
+- `latent_generation.yaml` — the base experiment YAML (defaults + project paths).
+- `H100_joint_{block,causal}.yaml` — 1 × H100 80 GB. Block vs causal C2F mask.
+- `H200_joint_{block,causal}.yaml` — H200 141 GB variants with larger batch sizes.
 
 | Section | Controls |
 |---|---|
@@ -672,6 +780,8 @@ Scripts 04, 05, and 06 work without a config file (using built-in defaults); scr
 | `sft` | Steps 3–4: base model, batch size, LR, epochs, `prompt_data` (step 1 output path) |
 | `generation` | Step 5: sampling params (temperature, top_p, top_k, max_tokens) |
 | `c2f_training` | Step 6: init source, tokenizer type, mask type (`block` or `causal`), FSDP, full HF Trainer config |
+| `ar_training` | Step 6b: architecture + HF Trainer config for the no-latents AR baseline; kept in lockstep with `c2f_training` for fair comparison |
+| `diffusion_training` | Step 6c: same arch mirror as `ar_training` plus MDLM knobs (`eps_t`, `noise_eps`, `antithetic`, `n_eval_samples`) |
 | `rl.sft_rl` | Step 7A: GRPO rollout group size, KL coefficient, format bonus weight |
 | `rl.c2f_finetune` | Step 7B: generation and C2F fine-tuning hyperparams |
 | `rl.joint` | Step 7 joint: $p_\theta$ LR/WD, save cadence, mask type, malformed reward |
@@ -702,34 +812,42 @@ coarse-to-fine/
 ├── batch_api_requests/              # standalone batch API utilities (cost analysis, monitoring)
 │
 ├── scripts/
-│   ├── 00_prepare_data.py           # step 0 — download, preprocess, shuffle, split
-│   ├── 01_create_batch_requests.py  # step 1 — format documents into batch API JSONL
-│   ├── 02_submit_batch.py           # step 2 — submit, monitor, download batch results
-│   ├── 03_verify_outputs.py         # step 3 — verify batch outputs → SFT parquet
-│   ├── 04_sft_train.py              # step 4 — HF Trainer SFT (± FSDP)
-│   ├── 05_generate_local.py         # step 5 — generate via vLLM or HF, verify, flatten
-│   ├── 06_train_decoder.py          # step 6 — C2F pretraining via HF Trainer ± FSDP
-│   ├── 07_rl_train.py               # step 7 — ELBO optimisation (sft / c2f / both / joint)
-│   ├── 08_eval_joint.py             # step 8 — posterior-collapse diagnostic
-│   ├── 09_eval_nll.py               # step 9 — unified NLL evaluator (ar / c2f / diffusion)
-│   └── slurm_*.sh                   # SLURM job scripts for steps 0–7
+│   ├── 00_prepare_data.py              # step 0 — download, preprocess, shuffle, split
+│   ├── 01_create_batch_requests.py     # step 1 — format documents into batch API JSONL
+│   ├── 02_submit_batch.py              # step 2 — submit, monitor, download batch results
+│   ├── 03_verify_outputs.py            # step 3 — verify batch outputs → SFT parquet
+│   ├── 04_sft_train.py                 # step 4 — HF Trainer SFT (± FSDP)
+│   ├── 05_generate_local.py            # step 5 — generate via vLLM or HF, verify, flatten
+│   ├── 06_train_decoder.py             # step 6 — C2F pretraining via HF Trainer ± FSDP
+│   ├── 06b_train_ar_baseline.py        # step 6b — AR (no-latent) baseline
+│   ├── 06c_train_diffusion_baseline.py # step 6c — MDLM masked-diffusion baseline
+│   ├── 07_rl_train.py                  # step 7 — ELBO optimisation (sft / c2f / both / joint)
+│   ├── 08_eval_joint.py                # step 8 — posterior-collapse diagnostic
+│   ├── 09_eval_nll.py                  # step 9 — unified NLL evaluator (ar / c2f / c2f_bound / diffusion)
+│   └── slurm_*.sh                      # SLURM job scripts for steps 0–7 + 6b, 6c
 │
 ├── src/
 │   ├── config.py            Pydantic config schema + loader (all defaults defined here)
+│   ├── common/              load_env, setup_wandb, shared logger, constants, PROJECT_ROOT
 │   ├── batch/               step 1–2 — OpenAI client, request creation, submit/monitor, cost
 │   ├── data/                step 0 — dataset registry, preprocessing, Pydantic schemas
 │   ├── verification/        step 3 — space-based verifier (z_N format + word counts)
-│   ├── sft/                 step 3–4 — SFT parquet creation (dataset.py)
-│   ├── generation/          step 5 — generate_vllm / generate_hf, prompt loading, flatten
-│   ├── qwen3_joint/         C2F model — C2FConfig, C2FForCausalLM, block-prefix + causal attention
-│   ├── c2f_training/        step 6 — C2FDataset, C2FTrainer, space tokenizer
+│   ├── sft/                 step 3–4 — SFT parquet creation (dataset.py) + Trainer loop (train.py)
+│   ├── generation/          step 5 — vLLM / HF inference, prompt loading, flatten_for_c2f, RL parquet builder
+│   ├── c2f_model/           C2F model — C2FConfig, C2FForCausalLM, block-prefix + causal attention
+│   │   └── training/        steps 6/6b/6c — C2FDataset, ARDataset, space tokenizer, C2FTrainer, DiffusionTrainer
 │   ├── rl/                  step 7 — C2FRewardManager (alternating), JointC2FRewardManager, veRL config, phase orchestration
-│   └── utils/               load_env, setup_wandb
+│   └── eval/                step 9 — ar.py / c2f.py / bound.py / diffusion.py (per-model kind evaluators) + common bootstrap
 │
 ├── tests/
 │   ├── test_config.py               config loading, propagation, derived fields
 │   ├── test_verification.py         verifier logic (pass/fail, word counts, ordering)
-│   └── test_dataset.py              format detection, SFT dataset creation
+│   ├── test_dataset.py              format detection, SFT / C2F / AR dataset creation
+│   ├── test_block_mode_leak.py      block-mode attention cannot leak input_ids[i] into logits[i]
+│   ├── test_diffusion.py            MDLM loss / schedule / SUBS parameterisation
+│   ├── test_eval_batching.py        AR batched eval matches per-doc reference
+│   ├── test_eval_bound.py           c2f_bound evaluator (row order, K=1 ELBO sanity)
+│   └── test_reward_common.py        reward-manager helpers (layer parsing, C2F input builder)
 │
 ├── data/
 │   ├── tinystoriesv2_shuffled/  step 0 output  (chunks, val, test, prompt, rl splits)
@@ -762,10 +880,12 @@ Enable W&B by setting `wandb.enabled: true` in the experiment YAML and providing
 | 4 — SFT | `train/loss`, `eval/loss`, learning rate schedule |
 | 5 — Generation | Verification pass rate (% of outputs meeting word-count constraints) |
 | 6 — C2F pretrain | `loss_z_4`, `loss_z_3`, `loss_z_2`, `loss_z_1`, `loss_text` (per-scale CE loss) |
+| 6b — AR baseline | `train/loss`, `eval/loss` on text-only (matched architecture to step 6) |
+| 6c — diffusion baseline | MDLM NELBO (`train/loss`) — lower bound on $-\log p(x)$ per masked position |
 | 7A — GRPO ($q_\phi$) | Token-normalised reward ($\log p_\theta$) trending up; format pass rate increasing; KL stable |
 | 7B — C2F SFT ($p_\theta$) | `eval/loss` decreasing on freshly generated $q_\phi$ samples |
 | 7 joint | Per-step `p_loss`, `reward`, `malformed` fraction (via `reward_extra_info`); rolling $p_\theta$ checkpoints kept at `rl.joint.c2f_keep_last_n` |
 | 8 — collapse | Unique/total $z$ token ratio, top-5 most common $z$ tokens (stdout) |
-| 9 — NLL | Aggregate nats/word + 95 % CI, per-scale nats/token for C2F, per-doc JSONL export |
+| 9 — NLL | Aggregate nats/word + 95 % CI, per-scale nats/token for C2F, per-doc JSONL export. For `c2f_bound`: mean `joint_nll_p` and mean `nll_q` are also printed. |
 
-Each step adds a run tag (`sft`, `generation`, `c2f-pretrain`, `rl-sft`, `rl-c2f`) so runs are filterable in the W&B dashboard. All scripts call `load_env()` and `setup_wandb()` from `src/common/env.py` before any training-framework imports.
+Each step adds a run tag (`sft`, `generation`, `c2f-pretrain-{block,causal}`, `ar-baseline`, `diffusion-baseline`, `rl-sft`, `rl-c2f`) so runs are filterable in the W&B dashboard. All scripts call `load_env()` and `setup_wandb()` from `src/common/env.py` before any training-framework imports.

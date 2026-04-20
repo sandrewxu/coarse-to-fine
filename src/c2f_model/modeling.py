@@ -15,10 +15,6 @@ To upgrade the base model, diff against `transformers.models.qwen3.modeling_qwen
 and re-apply each `# C2F:` block. See `README.md` in this folder for details.
 """
 
-# C2F: -----------------------------------------------------------------------
-# All code below is specific to the Coarse-to-Fine model.  Every departure
-# from the Qwen3 base is annotated with a "# C2F:" comment.
-# ----------------------------------------------------------------------------
 from collections.abc import Callable
 
 import torch

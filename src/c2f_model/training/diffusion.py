@@ -9,8 +9,7 @@ Bit-faithful port of the continuous-time SUBS variant of MDLM
 - ``sample_t``           ↔ ``mdlm/diffusion.py:800-808``
 - ``mdlm_loss``          ↔ ``mdlm/diffusion.py:847-894`` (continuous-time, SUBS)
 
-Intentional deviations from upstream (also documented in
-``plans/please-thoroughly-examine-my-kind-sunset.md``):
+Intentional deviations from upstream:
 
 1. The MASK index is a dedicated ``[MASK]`` token (id=4) added to the space
    tokenizer's reserved specials — it never appears in real docs, so
