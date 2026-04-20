@@ -86,6 +86,19 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None, help="Cap number of docs scored.")
     parser.add_argument("--batch-size", type=int, default=8, help="C2F forward batch size.")
     parser.add_argument(
+        "--ar-batch-size",
+        type=int,
+        default=16,
+        help="AR doc batch size (right-padded + attention mask; 1 = legacy per-doc).",
+    )
+    parser.add_argument(
+        "--mc-batch-size",
+        type=int,
+        default=16,
+        help="Diffusion MC samples packed per forward; effective batch is "
+        "--batch-size * --mc-batch-size (clamped to --N).",
+    )
+    parser.add_argument(
         "--K",
         type=int,
         default=1,
@@ -135,6 +148,7 @@ def main() -> int:
             config=config,
             limit=args.limit,
             tokenizer_dir=args.tokenizer_dir,
+            batch_size=args.ar_batch_size,
         )
     elif args.model_kind == "c2f":
         result = eval_c2f(
@@ -155,6 +169,7 @@ def main() -> int:
             tokenizer_dir=args.tokenizer_dir,
             N=args.N,
             batch_size=args.batch_size,
+            mc_batch_size=args.mc_batch_size,
         )
     else:  # pragma: no cover — argparse choices guard this
         raise ValueError(args.model_kind)

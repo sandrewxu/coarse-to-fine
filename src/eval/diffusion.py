@@ -9,6 +9,13 @@ For each test document, we draw ``N`` samples of ``(t, mask)`` and average the
 per-position weighted CE — that's the NELBO estimate. Default ``N=128``
 honors the ``08`` stub's planned tightness; raise ``N`` if MC noise dominates
 the doc-level variance in the bootstrap CI.
+
+MC samples are drawn iid and independent across docs, so we batch them along
+the batch dim: each doc is tiled ``mc_batch_size`` times, fed through the
+model in one forward pass, and the per-doc NELBOs averaged. This is
+statistically equivalent to the sequential inner loop (same distribution of
+``t`` and ``mask`` per replicate) while cutting forward-pass count by that
+factor.
 """
 
 import json
@@ -42,6 +49,50 @@ def _load_jsonl(path: Path, limit: int | None) -> list[str]:
     return docs
 
 
+def _mc_nelbo_batch(
+    model,
+    x0: torch.Tensor,
+    loss_mask: torch.Tensor,
+    *,
+    mask_id: int,
+    pad_id: int,
+    schedule,
+    eps_t: float,
+    N: int,
+    mc_batch_size: int,
+) -> torch.Tensor:
+    """MC-NELBO per doc for one doc batch, packing ``mc_batch_size`` iid samples per forward.
+
+    MC draws are iid and independent across docs, so tiling along the batch
+    dim is statistically equivalent to the sequential inner loop.
+    """
+    from src.c2f_model.training.diffusion import mdlm_loss
+
+    B = x0.shape[0]
+    doc_accum = torch.zeros(B, dtype=torch.float64, device=x0.device)
+    remaining = N
+    while remaining > 0:
+        m = min(mc_batch_size, remaining)
+        x0_rep = x0.repeat_interleave(m, dim=0)
+        mask_rep = loss_mask.repeat_interleave(m, dim=0)
+        sample_nll = mdlm_loss(
+            model,
+            x0_rep,
+            mask_rep,
+            mask_id=mask_id,
+            pad_id=pad_id,
+            schedule=schedule,
+            eps_t=eps_t,
+            # iid draws across MC samples — antithetic would correlate within
+            # the batch axis, which is wrong for independent MC replicates.
+            antithetic=False,
+            reduction="per_doc",
+        )  # (B*m,)
+        doc_accum += sample_nll.view(B, m).sum(dim=1).to(torch.float64)
+        remaining -= m
+    return doc_accum / N
+
+
 @torch.no_grad()
 def eval_diffusion(
     *,
@@ -52,6 +103,7 @@ def eval_diffusion(
     tokenizer_dir: Path | None = None,
     N: int = 128,
     batch_size: int = 8,
+    mc_batch_size: int = 16,
 ) -> dict[str, Any]:
     """Compute MC-NELBO for a SUBS-MDLM checkpoint on a JSONL test set.
 
@@ -63,13 +115,16 @@ def eval_diffusion(
         tokenizer_dir: Override the space tokenizer dir (else from config).
         N: MC samples per document.
         batch_size: Documents per forward pass.
+        mc_batch_size: MC samples packed in parallel per forward. Effective
+            batch is ``batch_size * mc_batch_size`` — lower if OOM, raise to
+            use more of the GPU. Clamped to ``N``.
 
     Returns:
         Dict matching AR/C2F evaluators with extra ``N`` field.
     """
     from transformers import AutoModelForCausalLM
 
-    from src.c2f_model.training.diffusion import LogLinearNoise, mdlm_loss
+    from src.c2f_model.training.diffusion import LogLinearNoise
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -95,7 +150,13 @@ def eval_diffusion(
     text_word_count = config.get("text_word_count", 32)
 
     docs = _load_jsonl(test, limit)
-    log.info("Scoring %d documents with N=%d MC samples...", len(docs), N)
+    mc_batch_size = max(1, min(mc_batch_size, N))
+    log.info(
+        "Scoring %d documents with N=%d MC samples (mc_batch_size=%d)...",
+        len(docs),
+        N,
+        mc_batch_size,
+    )
 
     bos = tokenizer.bos_token_id or tokenizer.eos_token_id
 
@@ -117,35 +178,29 @@ def eval_diffusion(
     per_doc_nll = np.zeros(len(docs), dtype=np.float64)
     rows: list[dict] = []
 
-    # MC samples per doc, batched across docs for GPU efficiency.
     for start in range(0, len(docs), batch_size):
         end = min(start + batch_size, len(docs))
+        B = end - start
         x0 = all_ids[start:end].to(device)  # (B, S)
         # loss_mask: 1 at content tokens (positions 1..n_tok), 0 at BOS / padding.
         loss_mask = torch.zeros_like(x0, dtype=torch.float32)
-        for b in range(end - start):
+        for b in range(B):
             n_tok = int(per_doc_tokens[start + b])
             loss_mask[b, 1 : 1 + n_tok] = 1.0
 
-        doc_accum = torch.zeros(end - start, dtype=torch.float64, device=device)
-        for _ in range(N):
-            sample_nll = mdlm_loss(
-                model,
-                x0,
-                loss_mask,
-                mask_id=mask_id,
-                pad_id=pad_id,
-                schedule=schedule,
-                eps_t=eps_t,
-                # Antithetic sampling within a fixed batch is meaningless here
-                # (we want independent draws across MC samples), so disable.
-                antithetic=False,
-                reduction="per_doc",
-            )
-            doc_accum += sample_nll.to(torch.float64)
-        doc_accum /= N  # mean over MC samples → unbiased NELBO estimate
+        doc_accum = _mc_nelbo_batch(
+            model,
+            x0,
+            loss_mask,
+            mask_id=mask_id,
+            pad_id=pad_id,
+            schedule=schedule,
+            eps_t=eps_t,
+            N=N,
+            mc_batch_size=mc_batch_size,
+        )
 
-        for b in range(end - start):
+        for b in range(B):
             doc_idx = start + b
             nll = float(doc_accum[b].item())
             n_tok = int(per_doc_tokens[doc_idx])
