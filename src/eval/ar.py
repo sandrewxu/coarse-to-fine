@@ -11,7 +11,6 @@ per-doc NLLs that match the unbatched (``batch_size=1``) reference to within
 floating-point noise — see ``tests/test_eval_batching.py``.
 """
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -19,27 +18,14 @@ import numpy as np
 import torch
 
 from src.common.logging import get_logger
-from src.eval.common import bootstrap_ci, check_vocab_consistency, load_space_tokenizer
+from src.eval.common import (
+    bootstrap_ci,
+    check_vocab_consistency,
+    load_space_tokenizer,
+    load_test_docs,
+)
 
 log = get_logger(__name__)
-
-
-def _load_jsonl(path: Path, limit: int | None) -> list[str]:
-    """Load up to ``limit`` documents from a JSONL file (one ``{"text": str}`` per line)."""
-    docs: list[str] = []
-    with path.open() as f:
-        for i, line in enumerate(f):
-            if limit is not None and i >= limit:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                docs.append(obj.get("text", obj) if isinstance(obj, dict) else obj)
-            except json.JSONDecodeError:
-                docs.append(line)
-    return docs
 
 
 @torch.no_grad()
@@ -76,7 +62,8 @@ def eval_ar(
     model.eval()
     check_vocab_consistency(model.config.vocab_size, tokenizer.vocab_size)
 
-    docs = _load_jsonl(test, limit)
+    text_word_count = config.get("text_word_count", 32)
+    docs = load_test_docs(test, limit, text_word_count=text_word_count)
     log.info("Scoring %d documents (batch_size=%d)...", len(docs), batch_size)
 
     bos = tokenizer.bos_token_id or tokenizer.eos_token_id

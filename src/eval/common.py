@@ -13,6 +13,72 @@ import numpy as np
 from src.common.paths import PROJECT_ROOT
 
 
+def load_test_docs(
+    test: Path,
+    limit: int | None,
+    *,
+    text_word_count: int,
+) -> list[str]:
+    """Load raw text documents from any of the test-file formats we support.
+
+    Returns one text string per document (the ``x`` itself — no latents, no
+    chat wrapping). Used by the AR and diffusion evaluators so they score the
+    same doc subset the C2F evaluators do when handed the same parquet.
+
+    Dispatch rules:
+    - ``.jsonl``: one JSON object per line; read the ``"text"`` field (or the
+      raw line if not JSON).
+    - ``.parquet`` with a ``prompt`` column: SFT or veRL format; return
+      ``prompt`` (the raw text).
+    - ``.parquet`` with only a ``text`` column: c2f (flattened) format; the
+      final ``text_word_count`` whitespace-separated words of each row are
+      the original ``x`` by construction of ``flatten_for_c2f``.
+
+    ``limit`` (if not None) is applied after loading.
+    """
+    suffix = test.suffix.lower()
+    if suffix == ".jsonl":
+        docs: list[str] = []
+        with test.open() as f:
+            for i, line in enumerate(f):
+                if limit is not None and i >= limit:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    docs.append(obj.get("text", obj) if isinstance(obj, dict) else obj)
+                except json.JSONDecodeError:
+                    docs.append(line)
+        return docs
+
+    if suffix == ".parquet":
+        import pyarrow.parquet as pq
+
+        cols = pq.read_schema(str(test)).names
+        if "prompt" in cols:
+            prompts = pq.read_table(str(test), columns=["prompt"]).column("prompt").to_pylist()
+            # veRL format stores prompt as a list of chat messages; unwrap to text.
+            flat: list[str] = []
+            for p in prompts:
+                if isinstance(p, list) and p and isinstance(p[0], dict):
+                    flat.append(p[-1].get("content", ""))
+                else:
+                    flat.append(p if isinstance(p, str) else str(p))
+            return flat[:limit] if limit is not None else flat
+        if "text" in cols:
+            texts = pq.read_table(str(test), columns=["text"]).column("text").to_pylist()
+            out = [" ".join(t.split()[-text_word_count:]) for t in texts]
+            return out[:limit] if limit is not None else out
+        raise ValueError(
+            f"Parquet {test} has neither a 'prompt' nor 'text' column "
+            f"(columns: {cols}); cannot load documents for evaluation."
+        )
+
+    raise ValueError(f"Unsupported test-file suffix {suffix!r} at {test}. Use .jsonl or .parquet.")
+
+
 def load_space_tokenizer(config: dict[str, Any], tokenizer_dir: Path | None = None):
     """Load the repo's space (word-level) tokenizer.
 

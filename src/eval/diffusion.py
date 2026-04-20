@@ -18,7 +18,6 @@ statistically equivalent to the sequential inner loop (same distribution of
 factor.
 """
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -26,27 +25,14 @@ import numpy as np
 import torch
 
 from src.common.logging import get_logger
-from src.eval.common import bootstrap_ci, check_vocab_consistency, load_space_tokenizer
+from src.eval.common import (
+    bootstrap_ci,
+    check_vocab_consistency,
+    load_space_tokenizer,
+    load_test_docs,
+)
 
 log = get_logger(__name__)
-
-
-def _load_jsonl(path: Path, limit: int | None) -> list[str]:
-    """Same loader as ``src.eval.ar`` — keeps the AR/diffusion test paths identical."""
-    docs: list[str] = []
-    with path.open() as f:
-        for i, line in enumerate(f):
-            if limit is not None and i >= limit:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                docs.append(obj.get("text", obj) if isinstance(obj, dict) else obj)
-            except json.JSONDecodeError:
-                docs.append(line)
-    return docs
 
 
 def _mc_nelbo_batch(
@@ -152,7 +138,7 @@ def eval_diffusion(
     eps_t = df_cfg.get("eps_t", 1e-3)
     text_word_count = config.get("text_word_count", 32)
 
-    docs = _load_jsonl(test, limit)
+    docs = load_test_docs(test, limit, text_word_count=text_word_count)
     mc_batch_size = max(1, min(mc_batch_size, N))
     log.info(
         "Scoring %d documents with N=%d MC samples (mc_batch_size=%d)...",

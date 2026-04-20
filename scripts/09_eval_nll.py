@@ -43,6 +43,7 @@ from typing import Any
 from src.common.logging import get_logger
 from src.common.paths import PROJECT_ROOT
 from src.eval import eval_ar, eval_c2f, eval_diffusion
+from src.eval.bound import eval_c2f_bound
 from src.eval.common import save_per_doc
 
 log = get_logger(__name__)
@@ -56,6 +57,8 @@ def _print_summary(result: dict[str, Any]) -> None:
     log.info("=" * 60)
     log.info("  model_kind       = %s", result["model_kind"])
     log.info("  ckpt             = %s", result["ckpt"])
+    if "sft_ckpt" in result:
+        log.info("  sft_ckpt (q_φ)   = %s", result["sft_ckpt"])
     if "mask_type" in result:
         log.info("  mask_type        = %s", result["mask_type"])
     if "K" in result:
@@ -64,8 +67,18 @@ def _print_summary(result: dict[str, Any]) -> None:
         log.info("  MC samples N     = %d", result["N"])
     log.info("  num_docs         = %d", result["num_docs"])
     log.info("  total_tokens     = %d", result["total_tokens"])
-    log.info("  nats/word        = %.4f  (bits/word = %.4f, ppl = %.4g)", mean, bits, ppl)
-    log.info("  95%% CI (nats/w)  = [%.4f, %.4f]", lo, hi)
+    # For the c2f_bound path, "nats_per_word" is really
+    # (joint_nll_p - nll_q) / text_word_count — a per-text-word upper bound
+    # on -log p(x) that's directly comparable to AR's exact NLL.
+    label = "nats/text_word (UB)" if result["model_kind"] == "c2f_bound" else "nats/word"
+    log.info("  %-17s = %.4f  (bits/word = %.4f, ppl = %.4g)", label, mean, bits, ppl)
+    log.info("  95%% CI           = [%.4f, %.4f]", lo, hi)
+    if "mean_joint_nll_p" in result:
+        log.info(
+            "  mean joint NLL_p = %.4f  (mean NLL_q = %.4f)",
+            result["mean_joint_nll_p"],
+            result["mean_nll_q"],
+        )
     if "per_scale_nats_per_token" in result:
         log.info("  per-scale nats/token:")
         for name, val in result["per_scale_nats_per_token"].items():
@@ -81,7 +94,11 @@ def main() -> int:
         "--test",
         required=True,
         type=Path,
-        help="Test data. jsonl for --model-kind ar; parquet (text or prompt+response) for c2f.",
+        help="Test data. Supported formats: .jsonl ({'text': ...} per line), "
+        "SFT parquet (prompt + response columns), or c2f parquet (flattened "
+        "text column). Passing the same c2f_val.parquet to all four "
+        "--model-kind values gives an apples-to-apples comparison on the "
+        "verified ~12k-doc subset.",
     )
     parser.add_argument("--limit", type=int, default=None, help="Cap number of docs scored.")
     parser.add_argument("--batch-size", type=int, default=8, help="C2F forward batch size.")
@@ -103,6 +120,21 @@ def main() -> int:
         type=int,
         default=1,
         help="IWAE sample count for c2f (only K=1 supported; K>1 needs q_φ sampler).",
+    )
+    parser.add_argument(
+        "--sft-ckpt",
+        type=Path,
+        default=None,
+        help="SFT checkpoint used as q_φ. When set with --model-kind c2f, switch "
+        "to the ELBO upper-bound evaluator (IWAE-1 with gold z): reports a true "
+        "-log p(x) / text_word_count upper bound, directly comparable to AR.",
+    )
+    parser.add_argument(
+        "--sft-batch-size",
+        type=int,
+        default=4,
+        help="SFT forward-pass batch size for the bound evaluator (typically "
+        "lower than --batch-size; SFT is Qwen3-4B on BPE-tokenized sequences).",
     )
     parser.add_argument(
         "--N",
@@ -151,15 +183,30 @@ def main() -> int:
             batch_size=args.ar_batch_size,
         )
     elif args.model_kind == "c2f":
-        result = eval_c2f(
-            ckpt=args.ckpt,
-            test=args.test,
-            config=config,
-            limit=args.limit,
-            batch_size=args.batch_size,
-            tokenizer_dir=args.tokenizer_dir,
-            K=args.K,
-        )
+        if args.sft_ckpt is not None:
+            if not args.sft_ckpt.exists():
+                log.error("sft-ckpt not found: %s", args.sft_ckpt)
+                return 1
+            result = eval_c2f_bound(
+                c2f_ckpt=args.ckpt,
+                sft_ckpt=args.sft_ckpt,
+                test=args.test,
+                config=config,
+                limit=args.limit,
+                batch_size=args.batch_size,
+                sft_batch_size=args.sft_batch_size,
+                tokenizer_dir=args.tokenizer_dir,
+            )
+        else:
+            result = eval_c2f(
+                ckpt=args.ckpt,
+                test=args.test,
+                config=config,
+                limit=args.limit,
+                batch_size=args.batch_size,
+                tokenizer_dir=args.tokenizer_dir,
+                K=args.K,
+            )
     elif args.model_kind == "diffusion":
         result = eval_diffusion(
             ckpt=args.ckpt,
