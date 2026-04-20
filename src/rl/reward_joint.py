@@ -113,16 +113,25 @@ class JointC2FRewardManager(RewardManagerBase):
         self._flusher_running: bool = False
         self._flusher_task: asyncio.Task | None = None
         self._flush_count: int = 0
+        # Legacy per-sample path, engaged when c2f_batch_window <= 0. A
+        # single asyncio.Lock serialises one fwd+bwd+step per sample with
+        # no queueing — matches the original pre-batching behaviour. Kept
+        # as an escape hatch because on single-GPU setups the opportunistic
+        # batcher can underperform the serialised path due to reward/vLLM
+        # CUDA-context contention.
+        self._legacy_lock = asyncio.Lock()
 
+        mode = "legacy-per-sample" if self._batch_window <= 0 else "opportunistic-batched"
         log.info(
             "JointC2FRewardManager ready. p trainable on %s, lr=%s, "
-            "malformed_reward=%s, batch_window=%ss, micro_bs=%d, gc_every=%d",
+            "malformed_reward=%s, batch_window=%ss, micro_bs=%d, gc_every=%d, mode=%s",
             self.device,
             c2f_lr,
             self.malformed_reward,
             self._batch_window,
             self._micro_bs,
             self._gc_every,
+            mode,
         )
 
     # ── Helpers ──────────────────────────────────────────────────────────────
@@ -569,6 +578,40 @@ class JointC2FRewardManager(RewardManagerBase):
             }
 
         input_ids, labels = self._build_input(layer_contents, str(gt))
+
+        # ── Legacy per-sample escape hatch ────────────────────────────────
+        # When ``c2f_batch_window <= 0``, bypass the flusher entirely and do
+        # one fwd+bwd+step per sample under a global lock. This reproduces
+        # the pre-batching behaviour verbatim, as a safety valve for setups
+        # where the opportunistic batcher underperforms (single-GPU reward
+        # ↔ vLLM CUDA contention).
+        if self._batch_window <= 0:
+            input_ids_dev = input_ids.unsqueeze(0).to(self.device)
+            labels_dev = labels.unsqueeze(0).to(self.device)
+            async with self._legacy_lock:
+                self.components.c2f_model.train(mode=not is_validate)
+                with torch.set_grad_enabled(not is_validate):
+                    sample_loss = self._ce_per_sample(input_ids_dev, labels_dev).squeeze(0)
+                reward_val = -sample_loss.detach().cpu().item()
+                p_loss_val = float(sample_loss.detach().cpu().item())
+                if not is_validate:
+                    self.optimizer.zero_grad()
+                    sample_loss.backward()
+                    self.optimizer.step()
+                    self._step += 1
+                    if self._step - self._last_save_step >= self._save_steps:
+                        self._last_save_step = self._step
+                        self._save_checkpoint()
+            return {
+                "reward_score": float(reward_val),
+                "reward_extra_info": {
+                    "p_loss": p_loss_val,
+                    "malformed": 0.0,
+                    "validate": 1.0 if is_validate else 0.0,
+                },
+            }
+
+        # ── Batched path ──────────────────────────────────────────────────
         # Stay on CPU until the flusher stacks + moves the batch — keeps
         # peak GPU memory from scaling with in-flight ``run_single`` count.
 

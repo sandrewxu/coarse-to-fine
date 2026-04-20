@@ -87,6 +87,7 @@ def _manager(mask_type: str = "causal", batch_window: float = 0.0) -> JointC2FRe
     mgr._flusher_running = False
     mgr._flusher_task = None
     mgr._flush_count = 0
+    mgr._legacy_lock = asyncio.Lock()
 
     # Stub save so a fake checkpoint doesn't try to touch disk.
     mgr._save_checkpoint = lambda: None  # type: ignore[method-assign]
@@ -422,6 +423,90 @@ def test_flusher_exits_and_restarts_on_empty_queue():
         r2 = await enqueue_one(2)
         assert isinstance(r1, float)
         assert isinstance(r2, float)
+
+    asyncio.run(run())
+
+
+def test_legacy_per_sample_path_engages_when_batch_window_zero():
+    """``c2f_batch_window <= 0`` should route run_single to the legacy
+    lock-based path (no flusher, one optimizer step per sample), as a
+    safety-valve for setups where the opportunistic batcher underperforms.
+    """
+
+    async def run():
+        mgr = _manager(batch_window=0)
+
+        step_calls = {"n": 0}
+        flush_calls = {"n": 0}
+        real_step = mgr.optimizer.step
+        real_process = mgr._process_batch
+
+        def counting_step(*a, **kw):
+            step_calls["n"] += 1
+            return real_step(*a, **kw)
+
+        def counting_process(batch_items):
+            flush_calls["n"] += 1
+            return real_process(batch_items)
+
+        mgr.optimizer.step = counting_step  # type: ignore[method-assign]
+        mgr._process_batch = counting_process  # type: ignore[method-assign]
+
+        # Minimal fake data item with the fields ``run_single`` reads.
+        class _Batch:
+            def __init__(self, response_ids):
+                self.batch = {"responses": response_ids}
+                self.non_tensor_batch: dict = {}
+
+        class _Data:
+            def __init__(self, item):
+                self._item = item
+                self.meta_info: dict = {}
+
+            def __getitem__(self, idx):
+                return self._item
+
+        # Provide a mock sft_tokenizer + word_count_constraints so
+        # ``parse_layers`` returns a valid layer list deterministically.
+        # Easier path: monkey-patch _build_input to return fixed tensors.
+        mgr._build_input = lambda *_a, **_kw: (  # type: ignore[method-assign]
+            torch.tensor([1, 2, 3, 4], dtype=torch.long),
+            torch.tensor([-100, 2, 3, 4], dtype=torch.long),
+        )
+
+        # Bypass parse_layers: patch it in the module namespace so run_single
+        # always sees a valid (non-malformed) response.
+        import src.rl.reward_joint as rj
+
+        rj.parse_layers = lambda *a, **kw: ["z4 content", "z3 content", "z2 content", "z1 content"]  # type: ignore[assignment]
+
+        # Fake minimal components for sft_tokenizer.decode.
+        import types as _types
+
+        fake_tok = _types.SimpleNamespace(
+            decode=lambda ids, skip_special_tokens=True: "z4:\nz3:\nz2:\nz1:\n",
+        )
+        fake_components = _types.SimpleNamespace(
+            c2f_model=mgr.components.c2f_model,
+            sft_tokenizer=fake_tok,
+            word_count_constraints={},
+            strict_word_count=False,
+        )
+        mgr.components = fake_components
+
+        data = _Data(
+            _Batch(torch.zeros(4, dtype=torch.long)),
+        )
+
+        # Call run_single three times — expect 3 optimizer steps, no flushes.
+        for _ in range(3):
+            result = await mgr.run_single(data)
+            assert "reward_score" in result
+
+        assert step_calls["n"] == 3, f"expected 3 legacy steps, got {step_calls['n']}"
+        assert flush_calls["n"] == 0, (
+            f"flusher should not run in legacy mode, got {flush_calls['n']}"
+        )
 
     asyncio.run(run())
 

@@ -31,12 +31,13 @@ rl:
     train_batch_size: 256
     ppo_micro_batch_size_per_gpu: 128
     c2f_micro_batch_size: 256
-    # Back-off between opportunistic drains. The flusher processes whatever
-    # arrived since the last drain, so reward GPU work overlaps with vLLM
-    # generation (no idle floor). 20 ms keeps per-drain batches in the
-    # tens-to-low-hundreds while staying well under one vLLM decode step.
-    c2f_batch_window: 0.02
-    c2f_gc_every: 5
+    # Set to 0 to engage the legacy per-sample path (one fwd+bwd+step per
+    # sample, serialised through a lock). Any positive value engages the
+    # opportunistic batcher, which has been observed to underperform the
+    # legacy path on single-GPU setups (reward ↔ vLLM CUDA contention).
+    # Flip to e.g. 0.05 to experiment with batching again.
+    c2f_batch_window: 0
+    c2f_gc_every: 50
 
 num_gpus: 1
 
