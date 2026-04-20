@@ -423,6 +423,12 @@ class JointC2FRewardManager(RewardManagerBase):
 
             del val_ids, val_labels, val_losses, val_loss_cpu
 
+    # Wait used for iterations *after* the first one — just enough to catch
+    # stragglers that arrived while we were processing and to detect
+    # quiescence before exiting. First iteration still uses the full
+    # ``c2f_batch_window`` to gather the bulk of the rollout.
+    _STRAGGLER_WINDOW_S: float = 0.1
+
     async def _flusher(self) -> None:
         """Drain the queue in coalesced batches until empty, then exit.
 
@@ -431,13 +437,23 @@ class JointC2FRewardManager(RewardManagerBase):
         ``run_single`` calls that found ``_flusher_running=False`` is the
         owner; it spawns this task. Subsequent enqueues while the flusher is
         live just append and await their future.
+
+        Timing: first iteration sleeps ``c2f_batch_window`` to let a full
+        rollout's worth of samples accumulate. After each productive flush,
+        subsequent iterations sleep only ``_STRAGGLER_WINDOW_S`` so we exit
+        promptly once the rollout is drained, instead of burning another
+        ``c2f_batch_window`` on an empty check.
         """
+        first_iteration = True
         try:
             while True:
                 # Batching window: yield to let more concurrent ``run_single``
-                # calls enqueue before we drain. A window of 0 still yields
-                # exactly once (``asyncio.sleep(0)`` releases control).
-                await asyncio.sleep(self._batch_window)
+                # calls enqueue before we drain. First iter covers the full
+                # rollout; later iters are just a straggler grace period.
+                await asyncio.sleep(
+                    self._batch_window if first_iteration else self._STRAGGLER_WINDOW_S
+                )
+                first_iteration = False
 
                 async with self._queue_lock:
                     batch_items = self._queue
