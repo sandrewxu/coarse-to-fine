@@ -46,6 +46,7 @@ c2f_training:
   checkpoint_dir: "checkpoints/decoder_causal"
   tokenizer_dir: "checkpoints/decoder_causal/tokenizer"
   per_device_batch_size: 512
+  gradient_accumulation_steps: 1
 
 # Step 6b: no-latents AR baseline. Architecture matched to c2f_training so
 # scripts/09_eval_nll.py can directly compare nats/word against decoder_causal.
@@ -59,6 +60,7 @@ ar_training:
   num_hidden_layers: 8
   checkpoint_dir: "checkpoints/ar_baseline_causal"
   per_device_batch_size: 512
+  gradient_accumulation_steps: 1
 
 # Step 6c: MDLM-style masked-diffusion baseline. Architecture matched to
 # c2f_training. Reuses [UNK] from the c2f tokenizer as the MASK index.
@@ -72,3 +74,4 @@ diffusion_training:
   num_hidden_layers: 8
   checkpoint_dir: "checkpoints/diffusion_baseline_causal"
   per_device_batch_size: 512
+  gradient_accumulation_steps: 1
