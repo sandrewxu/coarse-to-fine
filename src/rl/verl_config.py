@@ -11,6 +11,25 @@ from pathlib import Path
 from typing import Any
 
 
+def _split_rollout_parallelism(rl_config: dict[str, Any], num_gpus: int) -> tuple[int, int]:
+    """Resolve (tensor_parallel, data_parallel) for vLLM rollout.
+
+    Must satisfy ``tp * dp == num_gpus``. ``dp`` defaults to ``num_gpus // tp``
+    when unspecified (pure data-parallel rollout, which is the right shape for
+    small actors — TP all-reduces dominate per-layer compute below ~13B).
+    """
+    tp = int(rl_config.get("rollout_tensor_parallel_size", 1))
+    dp_opt = rl_config.get("rollout_data_parallel_size")
+    dp = int(dp_opt) if dp_opt is not None else num_gpus // tp
+    if tp * dp != num_gpus:
+        raise ValueError(
+            f"rollout TP ({tp}) × DP ({dp}) = {tp * dp}; must equal num_gpus ({num_gpus}). "
+            "Set rollout_tensor_parallel_size and/or rollout_data_parallel_size in "
+            "the rl.<phase> config section."
+        )
+    return tp, dp
+
+
 def build_verl_grpo_overrides(
     rl_sft_config: dict[str, Any],
     project_root: Path,
@@ -42,6 +61,7 @@ def build_verl_grpo_overrides(
     import os
 
     num_gpus = int(rl_sft_config.get("num_gpus", 1))
+    rollout_tp, rollout_dp = _split_rollout_parallelism(rl_sft_config, num_gpus)
     model_path = rl_sft_config.get("model_path", "Qwen/Qwen3-4B")
     dataset_dir = Path(rl_sft_config.get("dataset_dir", "data/rl_dataset"))
     checkpoint_dir = Path(rl_sft_config.get("checkpoint_dir", "checkpoints/rl/sft"))
@@ -91,6 +111,9 @@ def build_verl_grpo_overrides(
         # ── Actor / Rollout ───────────────────────────────────────────────────
         "++actor_rollout_ref.rollout.name=vllm",
         f"++actor_rollout_ref.rollout.n={rl_sft_config.get('rollout_n', 8)}",
+        f"++actor_rollout_ref.rollout.tensor_model_parallel_size={rollout_tp}",
+        f"++actor_rollout_ref.rollout.data_parallel_size={rollout_dp}",
+        "++actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
         f"++actor_rollout_ref.rollout.temperature={rl_sft_config.get('temperature', 1.0)}",
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
         # vLLM rollout KV-cache budget. Qwen3-4B's native max_position_embeddings
@@ -166,6 +189,7 @@ def build_verl_joint_overrides(
     import os
 
     num_gpus = int(rl_joint_config.get("num_gpus", 1))
+    rollout_tp, rollout_dp = _split_rollout_parallelism(rl_joint_config, num_gpus)
     model_path = rl_joint_config.get("model_path", "Qwen/Qwen3-4B")
     dataset_dir = Path(rl_joint_config.get("dataset_dir", "data/rl_dataset"))
     checkpoint_dir = Path(rl_joint_config.get("checkpoint_dir", "checkpoints/rl/joint"))
@@ -214,7 +238,8 @@ def build_verl_joint_overrides(
         # ── Actor / Rollout ─────────────────────────────────────────────────
         "++actor_rollout_ref.rollout.name=vllm",
         "++actor_rollout_ref.rollout.n=1",
-        f"++actor_rollout_ref.rollout.tensor_model_parallel_size={num_gpus}",
+        f"++actor_rollout_ref.rollout.tensor_model_parallel_size={rollout_tp}",
+        f"++actor_rollout_ref.rollout.data_parallel_size={rollout_dp}",
         "++actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
         f"++actor_rollout_ref.rollout.temperature={rl_joint_config.get('temperature', 1.0)}",
         f"++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",

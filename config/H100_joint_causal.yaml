@@ -1,5 +1,8 @@
 # H100 (80 GB) — step 6 causal decoder, step 7 joint RL with causal mask.
-# Run step 7 with: ++actor_rollout_ref.actor.fsdp_config.cpu_offload=true
+# Tuned for 2× H100 SXM (NV6 NVLink). FSDP shards the actor across both GPUs,
+# vLLM rollout runs DP=2 TP=1 (two replicas, no cross-GPU comm during generation).
+# On 1× H100 add ++actor_rollout_ref.actor.fsdp_config.cpu_offload=true and set
+# num_gpus: 1 (rollout falls back to TP=1 DP=1 automatically).
 scale_lengths: [2, 4, 8, 16, 32]
 
 wandb:
@@ -29,11 +32,18 @@ rl:
     c2f_lr: 1.0e-4
     checkpoint_dir: "checkpoints/rl/joint_causal"
     c2f_save_dir: "checkpoints/rl/joint_causal/c2f"
-    train_batch_size: 128
-    ppo_micro_batch_size_per_gpu: 16
-    c2f_micro_batch_size: 128
+    train_batch_size: 256
+    ppo_micro_batch_size_per_gpu: 32
+    c2f_micro_batch_size: 256
+    epochs: 1
+    # DP=2 rollout: two independent vLLM replicas, one per GPU. For 4B models
+    # this beats TP=2 because TP all-reduces dominate per-layer compute.
+    rollout_tensor_parallel_size: 1
+    # Per-GPU KV cache: each H100 holds one vLLM replica (~8 GB weights) plus
+    # an FSDP actor shard (~8 GB). 0.5 × 80 ≈ 40 GB KV — ample for 512-token seqs.
+    rollout_gpu_memory_utilization: 0.5
 
-num_gpus: 1
+num_gpus: 2
 
 c2f_training:
   fsdp: ""

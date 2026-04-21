@@ -45,7 +45,8 @@
       "Bash(gh issue *)",
       "Bash(uvx ruff *)",
       "Bash(curl -sL https://raw.githubusercontent.com/kuleshov-group/mdlm/master/noise_schedule.py -o /tmp/mdlm_noise.py)",
-      "Bash(curl -sL https://raw.githubusercontent.com/kuleshov-group/mdlm/master/diffusion.py -o /tmp/mdlm_diff.py)"
+      "Bash(curl -sL https://raw.githubusercontent.com/kuleshov-group/mdlm/master/diffusion.py -o /tmp/mdlm_diff.py)",
+      "Bash(uv pip *)"
     ]
   }
 }

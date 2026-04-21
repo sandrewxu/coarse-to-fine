@@ -244,6 +244,11 @@ class RlSftConfig(BaseModel):
     rollout_gpu_memory_utilization: float = 0.6
     rollout_max_num_seqs: int = 256
     rollout_max_num_batched_tokens: int = 32768
+    # Rollout parallelism split: TP × DP must equal num_gpus. TP=1 is right for
+    # small actors (<=13B) where TP all-reduces dominate per-layer compute.
+    # DP=None → num_gpus // tp (full data-parallel rollout).
+    rollout_tensor_parallel_size: int = 1
+    rollout_data_parallel_size: int | None = None
 
 
 class C2fFinetuneConfig(BaseModel):
@@ -290,6 +295,11 @@ class JointConfig(BaseModel):
     rollout_gpu_memory_utilization: float = 0.6
     rollout_max_num_seqs: int = 256
     rollout_max_num_batched_tokens: int = 32768
+    # Rollout parallelism split: TP × DP must equal num_gpus. TP=1 is right for
+    # small actors (<=13B) where TP all-reduces dominate per-layer compute.
+    # DP=None → num_gpus // tp (full data-parallel rollout).
+    rollout_tensor_parallel_size: int = 1
+    rollout_data_parallel_size: int | None = None
 
 
 class RlConfig(BaseModel):
