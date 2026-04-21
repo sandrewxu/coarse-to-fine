@@ -78,6 +78,23 @@ sbatch scripts/slurm_0N_*.sh
   `verl.experimental.reward_loop.reward_manager.base`), the imports in
   `src/rl/reward_sft.py` and `src/rl/reward_joint.py` are the canary — they'll
   break loudly.
+- **DP>1 vLLM rollout needs two vendored patches.** Small-model experiments
+  (e.g. Qwen3-4B on 2 GPUs) want `data_parallel_size=2, tensor_model_parallel_size=1`
+  because TP all-reduces eat the gain on dense <13B models. Two upstream bugs
+  block this in verl 0.7.x + vllm 0.11.x:
+  (1) `patches/verl_5609_dp_fix.patch` — verl gates DP-arg propagation on
+      `expert_parallel_size > 1`, so DP config never reaches vllm for dense
+      models. Fixed in verl PR #5609, missed the 0.7.1 tag by 8 h.
+  (2) `patches/vllm_dp_external_executor_fix.patch` — vllm's `gpu_worker.init_device`
+      adjusts `local_rank` by DP index unless the backend is in a denylist
+      `{"ray","external_launcher"}`. verl passes `ExternalZeroMQDistributedExecutor`
+      as a class (not a string), so the denylist doesn't match, rank gets
+      adjusted, and the assert `local_rank < torch.cuda.device_count()` trips
+      (each Ray actor sees only one GPU). Fixed upstream by vLLM PR #32816's
+      allowlist refactor; this patch is the minimal inline equivalent for 0.11.2.
+  After any `uv sync`, re-apply both: `./scripts/patch_verl.sh` (idempotent).
+  Remove `(1)` when `verl>=0.7.2` ships; remove `(2)` when a vllm release
+  includes the executor-backend allowlist fix.
 
 ## Where to add things
 

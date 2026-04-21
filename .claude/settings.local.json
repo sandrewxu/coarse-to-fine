@@ -50,7 +50,10 @@
       "Bash(curl -sL \"https://api.github.com/repos/volcengine/verl/releases\")",
       "Bash(curl -sL \"https://api.github.com/repos/volcengine/verl/tags\")",
       "Bash(curl -sL \"https://api.github.com/repos/verl-project/verl/compare/v0.7.0...v0.7.1?per_page=250\")",
-      "Bash(curl -sL \"https://api.github.com/repos/verl-project/verl/compare/v0.7.0...v0.7.1?per_page=250&page=2\")"
+      "Bash(curl -sL \"https://api.github.com/repos/verl-project/verl/compare/v0.7.0...v0.7.1?per_page=250&page=2\")",
+      "Bash(gh pr *)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(curl -s https://pypi.org/pypi/vllm/json)"
     ]
   }
 }

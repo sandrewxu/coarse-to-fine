@@ -1,0 +1,31 @@
+# vLLM fix (inner DP bug): skip DP rank-adjustment when the distributed
+# executor backend is passed as a class object rather than a known string
+# (e.g. verl's `ExternalZeroMQDistributedExecutor`).
+#
+# Symptom without this patch: `AssertionError: DP adjusted local rank 1 is
+# out of bounds.` — vLLM adjusts local_rank by DP index assuming all local
+# GPUs are visible to each engine process, but verl's Ray placement scopes
+# CUDA_VISIBLE_DEVICES to one GPU per actor, so `torch.cuda.device_count()`
+# inside the spawned DP engine is 1 and the assert trips.
+#
+# Equivalent to upstream vLLM PR #32816's spirit (allowlist of known
+# in-process backends) but implemented as a minimal insertion against the
+# existing denylist in 0.11.2's gpu_worker.py.
+#
+# Upstream issue (verl side):  https://github.com/verl-project/verl/issues/4926
+# Upstream fix (vLLM side):    https://github.com/vllm-project/vllm/pull/32816
+#
+# Apply via: ./scripts/patch_verl.sh  (idempotent)
+# Remove once a vllm release includes the allowlist fix.
+
+--- a/vllm/v1/worker/gpu_worker.py
++++ b/vllm/v1/worker/gpu_worker.py
+@@ -185,6 +185,7 @@
+                 self.parallel_config.data_parallel_size > 1
+                 and self.parallel_config.data_parallel_size_local > 0
+                 and self.parallel_config.distributed_executor_backend
+                 not in ["ray", "external_launcher"]
++                and isinstance(self.parallel_config.distributed_executor_backend, str)
+                 and self.vllm_config.parallel_config.data_parallel_backend != "ray"
+                 and self.vllm_config.parallel_config.nnodes_within_dp == 1
+             ):
