@@ -46,7 +46,11 @@
       "Bash(uvx ruff *)",
       "Bash(curl -sL https://raw.githubusercontent.com/kuleshov-group/mdlm/master/noise_schedule.py -o /tmp/mdlm_noise.py)",
       "Bash(curl -sL https://raw.githubusercontent.com/kuleshov-group/mdlm/master/diffusion.py -o /tmp/mdlm_diff.py)",
-      "Bash(uv pip *)"
+      "Bash(uv pip *)",
+      "Bash(curl -sL \"https://api.github.com/repos/volcengine/verl/releases\")",
+      "Bash(curl -sL \"https://api.github.com/repos/volcengine/verl/tags\")",
+      "Bash(curl -sL \"https://api.github.com/repos/verl-project/verl/compare/v0.7.0...v0.7.1?per_page=250\")",
+      "Bash(curl -sL \"https://api.github.com/repos/verl-project/verl/compare/v0.7.0...v0.7.1?per_page=250&page=2\")"
     ]
   }
 }
