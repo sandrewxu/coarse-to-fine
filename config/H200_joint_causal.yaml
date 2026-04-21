@@ -33,8 +33,6 @@ rl:
     ppo_micro_batch_size_per_gpu: 128
     c2f_micro_batch_size: 256
     epochs: 1
-    # Reduced from default 0.6 to leave room for a ~20 GB neighbor process
-    # on the shared H200. 0.60 − 20/143 ≈ 0.46; we leave a small safety margin.
     rollout_gpu_memory_utilization: 0.45
 num_gpus: 1
 

@@ -1,0 +1,241 @@
+scale_lengths:
+- 2
+- 4
+- 8
+- 16
+- 32
+num_gpus: 2
+seed: 42
+wandb:
+  enabled: true
+  project: null
+  entity: null
+  group: latent-generation
+  tags:
+  - qwen3-4b
+  - h100
+  - causal
+  mode: online
+batch:
+  provider: openai
+  model: gpt-5-nano-2025-08-07
+  reasoning_effort: low
+  verbosity: medium
+  system_prompt: latent-generation
+  user_prompt: gemini-3-pro-7
+  few_shot_examples: latent-generation
+  run_tag: latent_generation_10k_v1
+  prompt_data_dir: data/prompt_data
+  output_dir: data/batch_outputs
+verification:
+  strict_word_count: true
+data_prep:
+  dataset: tinystoriesv2
+  memory_gb: 8.0
+  seed: 42
+  num_chunks: 8
+  words_per_chunk: 32
+  k_validation: 5000
+  k_test: 5000
+  k_prompt: 25000
+  k_rl: 8000
+  raw_data_dir: data
+dataset:
+  output_dir: data/verified/latent_generation_10k_v1
+  data_dir: data/tinystoriesv2_shuffled
+  dataset_name: tinystoriesv2
+  num_chunks: 8
+  val_split: tinystoriesv2.val.jsonl
+  test_split: tinystoriesv2.test.jsonl
+  prompt_split: tinystoriesv2.prompt.jsonl
+  rl_split: tinystoriesv2.rl.jsonl
+sft:
+  model: Qwen/Qwen3-4B
+  num_gpus: 2
+  dataset_dir: data/sft_dataset
+  checkpoint_dir: checkpoints/sft
+  prompt_data: data/prompt_data/gpt-5-nano-2025-08-07/docs_0000100000/gemini-3-pro-7/latent-generation/sft.jsonl
+  max_length: 256
+  model_dtype: bf16
+  micro_batch_size_per_gpu: 16
+  use_remove_padding: true
+  use_liger: true
+  train_batch_size: 64
+  epochs: 2
+  lr: 1.0e-05
+  seed: 42
+generation:
+  model_path: checkpoints/sft/checkpoint-1172
+  output_dir: data/local_generations
+  chunks:
+  - 0
+  num_gpus: 2
+  max_tokens: 256
+  temperature: 0.7
+  top_p: 0.9
+  top_k: -1
+  repetition_penalty: 1.0
+  seed: 42
+  verify_outputs: true
+c2f_training:
+  init_from: random
+  dataset_dir: data/local_generations
+  dataset_format: sft
+  tokenizer: space
+  tokenizer_dir: checkpoints/tokenizer
+  checkpoint_dir: checkpoints/decoder_causal
+  num_gpus: 2
+  hidden_size: 512
+  intermediate_size: 2048
+  num_hidden_layers: 8
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  per_device_batch_size: 256
+  eval_batch_size: null
+  gradient_accumulation_steps: 1
+  epochs: 1
+  lr: 5.0e-05
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  eval_split: 0.05
+  fsdp: ''
+  report_to: none
+  run_name: c2f-pretrain
+  seed: 42
+  mask_type: causal
+ar_training:
+  dataset_dir: data/local_generations
+  dataset_format: sft
+  checkpoint_dir: checkpoints/ar_baseline
+  num_gpus: 2
+  hidden_size: 512
+  intermediate_size: 2048
+  num_hidden_layers: 8
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  per_device_batch_size: 256
+  eval_batch_size: null
+  gradient_accumulation_steps: 1
+  epochs: 1
+  lr: 5.0e-05
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  eval_split: 0.05
+  fsdp: ''
+  report_to: none
+  run_name: ar-baseline
+  seed: 42
+diffusion_training:
+  dataset_dir: data/local_generations
+  dataset_format: sft
+  checkpoint_dir: checkpoints/diffusion_baseline
+  num_gpus: 2
+  hidden_size: 512
+  intermediate_size: 2048
+  num_hidden_layers: 8
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  per_device_batch_size: 256
+  eval_batch_size: null
+  gradient_accumulation_steps: 1
+  epochs: 1
+  lr: 5.0e-05
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  max_grad_norm: 1.0
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  eval_split: 0.05
+  fsdp: ''
+  report_to: none
+  run_name: diffusion-baseline
+  seed: 42
+  eps_t: 0.001
+  noise_eps: 0.001
+  antithetic: true
+  n_eval_samples: 128
+rl:
+  sft_rl:
+    model_path: checkpoints/sft/checkpoint-1172
+    c2f_model_path: checkpoints/decoder
+    num_gpus: 2
+    dataset_dir: data/rl_dataset
+    checkpoint_dir: checkpoints/rl/sft
+    rollout_n: 8
+    max_prompt_length: 256
+    max_response_length: 256
+    train_batch_size: 64
+    temperature: 1.0
+    lr: 1.0e-06
+    kl_coef: 0.01
+    format_bonus_weight: 0.1
+    ppo_micro_batch_size_per_gpu: 8
+    dataloader_num_workers: 4
+    epochs: 1
+    rollout_gpu_memory_utilization: 0.6
+    rollout_max_num_seqs: 256
+    rollout_max_num_batched_tokens: 32768
+    rollout_tensor_parallel_size: 1
+    rollout_data_parallel_size: null
+  c2f_finetune:
+    model_path: checkpoints/decoder_causal
+    sft_model_path: checkpoints/rl/sft
+    dataset_dir: data/rl_dataset
+    generation_output_dir: data/rl_dataset/c2f_finetune
+    checkpoint_dir: checkpoints/rl/c2f
+    num_gpus: 2
+    num_samples: null
+    per_device_batch_size: 8
+    gradient_accumulation_steps: 4
+    lr: 5.0e-05
+    epochs: 3
+    fsdp: full_shard
+  joint:
+    model_path: checkpoints/sft/checkpoint-1172
+    c2f_model_path: checkpoints/decoder_causal
+    c2f_lr: 0.0001
+    c2f_weight_decay: 0.01
+    c2f_save_steps: 20000
+    c2f_save_dir: checkpoints/rl/joint_causal/c2f
+    c2f_mask_type: causal
+    num_gpus: 2
+    dataset_dir: data/rl_dataset
+    checkpoint_dir: checkpoints/rl/joint_causal
+    max_prompt_length: 256
+    max_response_length: 256
+    train_batch_size: 256
+    save_freq: 150
+    temperature: 1.0
+    lr: 1.0e-06
+    malformed_reward: -10.0
+    ppo_micro_batch_size_per_gpu: 32
+    dataloader_num_workers: 4
+    epochs: 1
+    c2f_micro_batch_size: 256
+    c2f_keep_last_n: 2
+    rollout_gpu_memory_utilization: 0.5
+    rollout_max_num_seqs: 256
+    rollout_max_num_batched_tokens: 32768
+    rollout_tensor_parallel_size: 1
+    rollout_data_parallel_size: null
+word_count_constraints:
+  z_4: 2
+  z_3: 4
+  z_2: 8
+  z_1: 16
+text_word_count: 32
