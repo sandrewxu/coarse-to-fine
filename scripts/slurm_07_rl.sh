@@ -2,13 +2,13 @@
 #SBATCH --job-name=rl_joint
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus=h100:1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=64G
-#SBATCH --time=1:00:00
+#SBATCH --gpus=h200:1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
+#SBATCH --time=12:00:00
 #SBATCH --partition=gpu
-#SBATCH --output=logs/rl/joint/rl_joint_%j.out
-#SBATCH --error=logs/rl/joint/rl_joint_%j.err
+#SBATCH --output=logs/rl/joint/slurm_%j.out
+#SBATCH --error=logs/rl/joint/slurm_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
 
 # Step 7: ELBO Optimisation — default PHASE=joint (REINFORCE++ on q_φ + MLE on p_θ).
@@ -35,13 +35,12 @@
 #   DEBUG=1   Enable verbose logging (LOG_LEVEL=DEBUG, VERL_LOGGING_LEVEL=INFO).
 #             Default is INFO / WARN (veRL upstream default).
 
-set -e
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+set -eo pipefail
+PROJECT_ROOT="$SLURM_SUBMIT_DIR"
 cd "$PROJECT_ROOT"
 
 PHASE=${PHASE:-joint}
-CONFIG=${CONFIG:-config/latent_generation.yaml}
+CONFIG=${CONFIG:-config/H200_joint_causal.yaml}
 
 # Log directory is phase-aware so the joint runs don't intermix with sft/c2f.
 LOG_DIR="logs/rl/${PHASE}"
@@ -55,10 +54,6 @@ LOG_FILE="$LOG_DIR/rl_${PHASE}_${RUN_TAG}.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "[slurm_07_rl.sh] logging to $LOG_FILE"
 
-# Activate venv if present
-if [ -d ".venv" ]; then
-  source .venv/bin/activate
-fi
 
 # Debug verbosity toggle.
 if [ "${DEBUG:-0}" = "1" ]; then
@@ -72,7 +67,7 @@ fi
 export C2F_CONFIG_PATH="$PROJECT_ROOT/$CONFIG"
 
 echo "[slurm_07_rl.sh] phase=$PHASE config=$CONFIG"
-python scripts/07_rl_train.py \
+uv run --no-sync python scripts/07_rl_train.py \
   --phase "$PHASE" \
   --config "$CONFIG" \
   "$@"

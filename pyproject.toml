@@ -44,7 +44,7 @@ sft = [
 # Pin matches the working install on Yale HPC (cluster build of vllm with
 # FA2 / CUDA 12.8). Bump deliberately and rebuild.
 generation = [
-    "vllm==0.12.0",
+    "vllm==0.11.2",
 ]
 # Step 6 — C2F model pretraining with HF Trainer + FSDP.
 # liger-kernel is currently unused (the `use_liger` config flag is not wired

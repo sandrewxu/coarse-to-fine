@@ -231,7 +231,7 @@ rl:
     rollout_gpu_memory_utilization: 0.5
     rollout_max_num_seqs: 256
     rollout_max_num_batched_tokens: 32768
-    rollout_tensor_parallel_size: 1
+    rollout_tensor_parallel_size: 2
     rollout_data_parallel_size: null
 word_count_constraints:
   z_4: 2

@@ -38,10 +38,11 @@ rl:
     epochs: 1
     # DP=2 rollout: two independent vLLM replicas, one per GPU. For 4B models
     # this beats TP=2 because TP all-reduces dominate per-layer compute.
-    rollout_tensor_parallel_size: 1
+    rollout_tensor_parallel_size: 2
     # Per-GPU KV cache: each H100 holds one vLLM replica (~8 GB weights) plus
     # an FSDP actor shard (~8 GB). 0.5 × 80 ≈ 40 GB KV — ample for 512-token seqs.
-    rollout_gpu_memory_utilization: 0.5
+    rollout_gpu_memory_utilization: 0.35
+    rollout_max_num_seqs: 128
 
 num_gpus: 2
 
