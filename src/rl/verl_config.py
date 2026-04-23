@@ -129,11 +129,12 @@ def build_verl_grpo_overrides(
         "++actor_rollout_ref.rollout.agent.num_workers=1",
         "++actor_rollout_ref.actor.use_kl_loss=true",
         f"++actor_rollout_ref.actor.kl_loss_coef={rl_sft_config.get('kl_coef', 0.01)}",
-        # Nonzero entropy_coeff enables `actor/entropy` in W&B (ray_trainer.py:1221
-        # gates the compute+log on entropy_coeff != 0). 1e-8 is numerically
-        # negligible in the loss (dp_actor.py:650: policy_loss -= entropy * coef)
-        # but turns the metric on so we can watch q_φ's rollout entropy.
-        f"++actor_rollout_ref.actor.entropy_coeff={rl_sft_config.get('entropy_coeff', 1e-8)}",
+        # ELBO entropy term. dp_actor.py:650 does `policy_loss -= entropy * coef`,
+        # equivalently adding `coef · H(q_φ)` to the maximization objective. At
+        # coef=1.0 the PPO objective becomes E_q[log p_θ(x,z)] + H(q_φ) = ELBO.
+        # Default 1.0 in RlSftConfig; tune from YAML to sweep deviations from
+        # the exact ELBO entropy term.
+        f"++actor_rollout_ref.actor.entropy_coeff={rl_sft_config.get('entropy_coeff', 1.0)}",
         f"++actor_rollout_ref.actor.optim.lr={rl_sft_config.get('lr', 1e-6)}",
         f"++actor_rollout_ref.actor.ppo_mini_batch_size={rl_sft_config.get('train_batch_size', 64)}",
         f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_sft_config.get('ppo_micro_batch_size_per_gpu', 8)}",
@@ -255,10 +256,11 @@ def build_verl_joint_overrides(
         f"++actor_rollout_ref.rollout.gpu_memory_utilization={rl_joint_config.get('rollout_gpu_memory_utilization', 0.6)}",
         "++actor_rollout_ref.rollout.agent.num_workers=1",
         "++actor_rollout_ref.actor.use_kl_loss=false",
-        # Enable `actor/entropy` logging so posterior-collapse demonstrations can
-        # show q_φ entropy decaying alongside p_loss going down. 1e-8 is
-        # numerically ≈ 0 in the loss, so the collapse dynamics are preserved.
-        f"++actor_rollout_ref.actor.entropy_coeff={rl_joint_config.get('entropy_coeff', 1e-8)}",
+        # ELBO entropy term. At coef=1.0 the joint PPO objective becomes
+        # E_q[log p_θ(x,z)] + H(q_φ) = ELBO exactly. Default 1.0 in JointConfig;
+        # tune from YAML (e.g. set to 1e-8 to reproduce posterior-collapse
+        # demonstrations where q_φ collapses alongside p_loss going down).
+        f"++actor_rollout_ref.actor.entropy_coeff={rl_joint_config.get('entropy_coeff', 1.0)}",
         f"++actor_rollout_ref.actor.optim.lr={rl_joint_config.get('lr', 1e-6)}",
         f"++actor_rollout_ref.actor.ppo_mini_batch_size={rl_joint_config.get('train_batch_size', 256)}",
         f"++actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={rl_joint_config.get('ppo_micro_batch_size_per_gpu', 16)}",

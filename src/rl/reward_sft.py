@@ -1,15 +1,66 @@
-"""Reward manager for Phase A (GRPO on q_φ, p_θ frozen).
+"""Reward manager for Phase A (GRPO on ``q_φ``, ``p_θ`` frozen).
 
-Reward = ``log p_θ(x, z) / num_tokens + format_bonus``.
+ELBO setup — two interchangeable paths
+--------------------------------------
 
-Implements veRL's class-based reward manager interface:
+The ELBO we want to optimize, per the project's simplified derivation, is
 
-    class MyRewardManager:
-        def __init__(self, tokenizer, num_examine=0, ...): ...
-        def __call__(self, data: DataProto, return_dict=False): ...
+    L(θ, φ; x) = E_{z ~ q_φ(z|x)}[ log p_θ(x, z) - log q_φ(z|x) ]     (I)
+               = E_{z ~ q_φ(z|x)}[ log p_θ(x, z) ] + H(q_φ)
 
-The C2F model and space tokenizer are loaded via the ``C2F_CONFIG_PATH`` env
-var (set by the SLURM/launch script), or fall back to the repo-relative path.
+There are two mathematically equivalent ways to implement (I) in veRL. Each
+has a knob in the experiment YAML.
+
+**Option B (preferred, default)** — use veRL's built-in entropy bonus:
+
+    reward(z)           = log p_θ(x, z)  + format_bonus
+    actor.entropy_coeff = rl.sft_rl.entropy_coeff  (default 1.0)
+
+``dp_actor.py:650`` subtracts ``entropy_coeff · H(q_φ)`` from the policy loss,
+equivalently adding it to the maximization objective. At ``entropy_coeff = 1``
+this *is* ``L`` — using the full-distribution per-token entropy (lower
+variance than a single-sample MC). No extra model load, no extra forward.
+
+**Option A (opt-in debug path)** — explicit reward-side ``-log q_ref(z|x)``:
+
+    reward(z)           = log p_θ(x, z) - α · log q_ref(z|x) + format_bonus
+    actor.kl_loss_coef  = β · KL(q_φ ∥ q_ref)
+
+With ``α = β = 1`` this is also ``L`` (the ``log q_ref`` terms cancel), but
+uses a *stale* ``q_ref`` (the initial SFT) for the entropy term and costs an
+extra frozen 4B model in the reward manager. Enable by setting
+``rl.sft_rl.ref_nll_coef > 0``; the reference model is loaded lazily.
+Defaults to OFF (``ref_nll_coef = 0``) so Option B is the single active path
+unless you explicitly turn Option A on for an ablation.
+
+**Why both**: Option B is cheaper and lower variance; Option A exposes
+``log q_ref`` in ``reward_extra_info`` for analysis, and lets you decouple
+``α`` from ``β`` to study deviations from the exact ELBO. For production
+training, leave Option A off.
+
+Deviations from the ELBO
+------------------------
+* ``format_bonus``: **reward shaping**, not part of the ELBO. It biases
+  ``q_φ`` toward producing the ``z_n:`` layered format and is constant on
+  valid responses. Once ``q_φ`` is emitting valid format reliably, the
+  bonus is a constant offset (gradient w.r.t. φ is zero) and doesn't
+  perturb the ELBO direction. In early training it *does* perturb the
+  gradient; treat it as a warm-start convenience.
+
+* ``/num_tokens`` normalization: **removed**. The PDF derivation uses the
+  un-normalized sequence log-prob ``log p(x, z)``. Per-token mean would
+  reweight docs by ``1/num_tokens``, which matters when ``num_tokens``
+  varies. In this project the response length is roughly constant
+  (strictly-verified z_n layout), but the un-normalized form exactly
+  matches the math.
+
+Reference model (Option A only)
+-------------------------------
+``q_ref`` is the initial SFT checkpoint (the actor's starting point for RL).
+That's the natural reference for the KL-to-reference term and, by the
+decomposition above, also the natural q_ref for the reward's -log q_ref term.
+Loaded in eval mode, bf16, frozen; one extra forward per reward call.
+Skipped entirely when ``ref_nll_coef == 0`` (the default).
 """
 
 from typing import Any
@@ -30,7 +81,7 @@ log = get_logger(__name__)
 
 
 class C2FRewardManager(RewardManagerBase):
-    """GRPO reward manager: scores SFT rollouts against a frozen C2F decoder."""
+    """GRPO reward manager implementing the ELBO reward for Phase A."""
 
     def __init__(
         self,
@@ -56,11 +107,42 @@ class C2FRewardManager(RewardManagerBase):
         # ── Phase-specific config ───────────────────────────────────────────
         rl_cfg = exp_config.get("rl", {}).get("sft_rl", {})
         self.format_bonus_weight: float = float(rl_cfg.get("format_bonus_weight", 0.1))
+        self.ref_nll_coef: float = float(rl_cfg.get("ref_nll_coef", 1.0))
+
+        # ── Reference model for -log q_ref(z|x) term ────────────────────────
+        self.ref_model = None
+        if self.ref_nll_coef != 0.0:
+            ref_path = rl_cfg.get("ref_model_path") or rl_cfg.get("model_path")
+            if not ref_path:
+                raise RuntimeError(
+                    "ref_nll_coef != 0 but neither rl.sft_rl.ref_model_path nor "
+                    "rl.sft_rl.model_path is set in the experiment YAML. The "
+                    "reward can't compute -log q_ref(z|x) without a reference model."
+                )
+            from transformers import AutoModelForCausalLM
+
+            log.info(
+                "Loading frozen reference SFT model from %s for ELBO reward (ref_nll_coef=%.3f)...",
+                ref_path,
+                self.ref_nll_coef,
+            )
+            self.ref_model = AutoModelForCausalLM.from_pretrained(
+                str(ref_path), trust_remote_code=True, dtype=torch.bfloat16
+            )
+            self.ref_model.to(self.device)
+            self.ref_model.eval()
+            for p in self.ref_model.parameters():
+                p.requires_grad_(False)
+        else:
+            log.info(
+                "ref_nll_coef=0.0 — skipping reference-model load. Reward degenerates "
+                "to log p_θ(x,z) + format_bonus (pre-ELBO behavior)."
+            )
 
     # ── Reward components ────────────────────────────────────────────────────
 
     def _format_bonus(self, response: str) -> float:
-        """Full bonus when all 4 layers pass; partial credit otherwise."""
+        """Shaping term — NOT part of the ELBO. See module docstring."""
         from src.rl.common import strip_think
 
         cleaned = strip_think(response)
@@ -83,8 +165,8 @@ class C2FRewardManager(RewardManagerBase):
         return 0.0
 
     @torch.no_grad()
-    def _log_p_c2f(self, layer_contents: list[str], prompt: str) -> tuple[float, int]:
-        """Compute ``log p_θ(x, z)`` and the unmasked-token count."""
+    def _log_p_c2f(self, layer_contents: list[str], prompt: str) -> float:
+        """Compute ``log p_θ(x, z)`` — the un-normalized sequence log-prob."""
         c = self.components
         input_ids, labels = build_c2f_input(
             layer_contents,
@@ -103,7 +185,57 @@ class C2FRewardManager(RewardManagerBase):
         outputs = c.c2f_model(input_ids=input_ids, labels=labels)
         loss: float = outputs.loss.item()
         num_unmasked: int = int((labels != -100).sum().item())
-        return -loss * num_unmasked, num_unmasked
+        # HF CE returns mean loss; multiply back by num_unmasked to get the
+        # summed log-prob as required by the ELBO (see module docstring).
+        return -loss * num_unmasked
+
+    @torch.no_grad()
+    def _log_q_ref_single(self, response: str, prompt: str) -> float:
+        """``log q_ref(z | x)`` summed over response tokens only.
+
+        Teacher-forces the chat-templated ``[user=x, assistant=z]`` sequence
+        through the frozen reference SFT model and sums log-probs of the
+        assistant-response tokens (prompt tokens masked out via labels=-100),
+        matching ``_sft_nll_per_doc`` in ``src/eval/bound.py``.
+        """
+        if self.ref_model is None:
+            return 0.0
+
+        tok = self.components.sft_tokenizer
+        messages = [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": response},
+        ]
+        full_text = tok.apply_chat_template(messages, tokenize=False)
+        full_ids = tok(full_text, truncation=True, max_length=4096)["input_ids"]
+
+        prompt_text = tok.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        prompt_ids = tok(prompt_text, truncation=True, max_length=4096)["input_ids"]
+
+        labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
+
+        input_ids_t = torch.tensor([full_ids], dtype=torch.long, device=self.device)
+        labels_t = torch.tensor([labels], dtype=torch.long, device=self.device)
+        attn = torch.ones_like(input_ids_t)
+
+        out = self.ref_model(input_ids=input_ids_t, attention_mask=attn)
+        shift_logits = out.logits[:, :-1, :]
+        shift_labels = labels_t[:, 1:]
+        per_tok = torch.nn.functional.cross_entropy(
+            shift_logits.reshape(-1, shift_logits.size(-1)),
+            shift_labels.reshape(-1),
+            ignore_index=-100,
+            reduction="none",
+        ).view(shift_labels.shape)
+        # per_tok is -log q_ref at each response position; zero at prompt (via
+        # ignore_index). Summed → NLL_ref(z|x) (non-negative). Return log-prob
+        # (negative) by negating.
+        nll_ref = per_tok.sum().item()
+        return -nll_ref
 
     # ── veRL interface ───────────────────────────────────────────────────────
 
@@ -135,9 +267,14 @@ class C2FRewardManager(RewardManagerBase):
             if layer_contents is None:
                 continue  # malformed → zero reward
 
-            log_p, num_tokens = self._log_p_c2f(layer_contents, str(prompt))
-            log_p_normalized = log_p / max(num_tokens, 1)
-            reward = log_p_normalized + self._format_bonus(response)
+            log_p = self._log_p_c2f(layer_contents, str(prompt))
+            log_q_ref = self._log_q_ref_single(response, str(prompt))
+            bonus = self._format_bonus(response)
+
+            # ELBO reward: log p(x,z) - α·log q_ref(z|x) + format_bonus.
+            # α=1 (default) with kl_loss_coef=1 in veRL gives the exact ELBO
+            # gradient on φ. See module docstring.
+            reward = log_p - self.ref_nll_coef * log_q_ref + bonus
 
             response_ids = data.batch["responses"][i]
             if pad_id is not None:
@@ -180,19 +317,22 @@ class C2FRewardManager(RewardManagerBase):
             return {
                 "reward_score": 0.0,
                 "reward_extra_info": {
-                    "log_p_normalized": 0.0,
+                    "log_p": 0.0,
+                    "log_q_ref": 0.0,
                     "format_bonus": 0.0,
                     "malformed": 1.0,
                 },
             }
 
-        log_p, num_tokens = self._log_p_c2f(layer_contents, str(gt))
-        log_p_normalized = log_p / max(num_tokens, 1)
+        log_p = self._log_p_c2f(layer_contents, str(gt))
+        log_q_ref = self._log_q_ref_single(response_str, str(gt))
         bonus = self._format_bonus(response_str)
+        reward = log_p - self.ref_nll_coef * log_q_ref + bonus
         return {
-            "reward_score": float(log_p_normalized + bonus),
+            "reward_score": float(reward),
             "reward_extra_info": {
-                "log_p_normalized": float(log_p_normalized),
+                "log_p": float(log_p),
+                "log_q_ref": float(log_q_ref),
                 "format_bonus": float(bonus),
                 "malformed": 0.0,
             },

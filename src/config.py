@@ -235,6 +235,28 @@ class RlSftConfig(BaseModel):
     lr: float = 1.0e-6
     kl_coef: float = 0.01
     format_bonus_weight: float = 0.1
+    # ── ELBO entropy term (preferred path, "Option B") ──────────────────────
+    # veRL's actor loss subtracts ``entropy_coeff · H(q_φ)`` from the loss,
+    # equivalently adding it to the maximization objective. At
+    # ``entropy_coeff = 1.0`` the PPO objective becomes
+    #   E_q[log p_θ(x, z)] + H(q_φ) = ELBO
+    # exactly (up to the usual PPO ratio approximation). Uses the full-
+    # distribution per-token entropy, which is a lower-variance estimator
+    # than the sampled ``-log q_φ(z)`` MC term. Default 1.0 = turn the ELBO on.
+    entropy_coeff: float = 1.0
+    # ── Explicit reward-side -log q_ref term ("Option A", opt-in) ──────────
+    # Adds ``-ref_nll_coef · log q_ref(z|x)`` to the scalar reward by loading
+    # a frozen reference SFT model inside the reward manager. At ``α = 1``
+    # paired with ``kl_coef = 1.0`` this is mathematically equivalent to
+    # ``entropy_coeff = 1.0`` — but uses a single-sample MC estimate (higher
+    # variance) and an extra 8 GB of GPU memory. Kept as an ablation / debug
+    # path. Default 0.0: OFF. Set to 1.0 only if you want to A/B against the
+    # entropy-bonus formulation or log per-rollout ``log q_ref`` for analysis.
+    ref_nll_coef: float = 0.0
+    # Path to the reference SFT model. If empty, falls back to ``model_path``
+    # (the actor's initial checkpoint — the natural reference since the actor
+    # *starts* as this model). Only loaded when ``ref_nll_coef > 0``.
+    ref_model_path: str = ""
     ppo_micro_batch_size_per_gpu: int = 8
     dataloader_num_workers: int = 4
     epochs: int = 1
@@ -289,6 +311,10 @@ class JointConfig(BaseModel):
     epochs: int = 12
     c2f_micro_batch_size: int = 32
     c2f_keep_last_n: int = 2
+    # ELBO entropy term — see RlSftConfig.entropy_coeff for the derivation.
+    # Default 1.0 adds H(q_φ) to the maximization objective, giving the ELBO
+    # entropy term exactly.
+    entropy_coeff: float = 1.0
     # vLLM rollout knobs — propagated to veRL as ``actor_rollout_ref.rollout.*``
     # in ``src/rl/verl_config.py``. Must be declared here so YAML values aren't
     # silently dropped by Pydantic's default extra='ignore' behaviour.
