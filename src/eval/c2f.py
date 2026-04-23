@@ -76,24 +76,16 @@ def eval_c2f(
     limit: int | None = None,
     batch_size: int = 8,
     tokenizer_dir: Path | None = None,
-    K: int = 1,
 ) -> dict[str, Any]:
-    """Compute the IWAE-1 ELBO bound on ``log p(x)`` for the C2F model.
+    """Compute the C2F joint training loss per content token on a held-out set.
 
-    Args:
-        K: IWAE sample count. Only ``K=1`` is currently supported; ``K>1`` will
-            require sampling ``z`` from ``q_φ`` per document (deferred).
+    This is the quantity the C2F decoder minimizes during training, evaluated
+    on a held-out split. It is the training-loss report — *not* an upper bound
+    on ``-log p(x)``. For that, use :func:`src.eval.bound.eval_c2f_bound`.
     """
     from src.c2f_model.configuration import C2FConfig
     from src.c2f_model.modeling import C2FForCausalLM
     from src.rl.common import load_c2f_weights
-
-    if K != 1:
-        raise NotImplementedError(
-            "IWAE-K > 1 for c2f requires sampling multiple z from q_φ per "
-            "document; the sampler will be added in a follow-up. Re-run with "
-            "K=1 for the ELBO lower bound."
-        )
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -184,7 +176,6 @@ def eval_c2f(
         "model_kind": "c2f",
         "ckpt": str(ckpt),
         "mask_type": mask_type,
-        "K": K,
         "num_docs": len(dataset),
         "total_tokens": int(per_doc_tokens.sum()),
         "nats_per_joint_token": point,

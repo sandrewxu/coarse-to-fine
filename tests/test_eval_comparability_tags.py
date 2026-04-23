@@ -91,7 +91,12 @@ def test_no_evaluator_uses_an_unknown_comparable_to_value():
     one, update this test deliberately so the reviewer sees it.
     """
     allowed = {"neg_log_p_x_per_text_word", "joint_train_loss_per_token"}
-    for rel_path in ("src/eval/ar.py", "src/eval/diffusion.py", "src/eval/bound.py", "src/eval/c2f.py"):
+    for rel_path in (
+        "src/eval/ar.py",
+        "src/eval/diffusion.py",
+        "src/eval/bound.py",
+        "src/eval/c2f.py",
+    ):
         result = _final_result_dict_literal(_PROJECT_ROOT / rel_path)
         assert result["comparable_to"] in allowed, (
             f"{rel_path} introduced a new comparable_to value "

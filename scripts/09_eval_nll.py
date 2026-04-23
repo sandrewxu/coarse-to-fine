@@ -91,6 +91,8 @@ def _print_summary(result: dict[str, Any]) -> None:
         log.info("  mask_type        = %s", result["mask_type"])
     if "K" in result:
         log.info("  IWAE K           = %d", result["K"])
+    if "q_temperature" in result:
+        log.info("  q temperature    = %.2f", result["q_temperature"])
     if "N" in result:
         log.info("  MC samples N     = %d", result["N"])
     log.info("  num_docs         = %d", result["num_docs"])
@@ -106,6 +108,10 @@ def _print_summary(result: dict[str, Any]) -> None:
     if "per_scale_nats_per_token" in result:
         log.info("  per-scale nats/token:")
         for name, val in result["per_scale_nats_per_token"].items():
+            log.info("    %5s: %.4f", name, val)
+    if "per_scale_joint_nll_per_text_word" in result:
+        log.info("  per-scale joint NLL_p / text_word (p-side only):")
+        for name, val in result["per_scale_joint_nll_per_text_word"].items():
             log.info("    %5s: %.4f", name, val)
     log.info("=" * 60)
     if is_train_loss:
@@ -160,7 +166,24 @@ def main() -> int:
         "--K",
         type=int,
         default=1,
-        help="IWAE sample count for c2f (only K=1 supported; K>1 needs q_φ sampler).",
+        help="IWAE sample count for c2f-bound. K=1 uses the gold z stored in "
+        "the test parquet (fast, no sampler). K>1 draws K fresh samples from "
+        "q_φ per doc via rejection on the word-count constraints — tighter "
+        "bound, slower. Ignored for c2f-train-loss.",
+    )
+    parser.add_argument(
+        "--q-temperature",
+        type=float,
+        default=1.0,
+        help="Sampling temperature for q_φ (c2f-bound, K>1 only). MUST remain "
+        "1.0 for a valid bound — T != 1.0 samples from q^{1/T}. Override only "
+        "for debugging.",
+    )
+    parser.add_argument(
+        "--q-max-new-tokens",
+        type=int,
+        default=128,
+        help="Max generation length for q_φ responses (c2f-bound, K>1 only).",
     )
     parser.add_argument(
         "--sft-ckpt",
@@ -252,6 +275,9 @@ def main() -> int:
             batch_size=args.batch_size,
             sft_batch_size=args.sft_batch_size,
             tokenizer_dir=args.tokenizer_dir,
+            K=args.K,
+            q_temperature=args.q_temperature,
+            q_max_new_tokens=args.q_max_new_tokens,
         )
     elif args.model_kind == "c2f-train-loss":
         if args.sft_ckpt is not None:
@@ -266,7 +292,6 @@ def main() -> int:
             limit=args.limit,
             batch_size=args.batch_size,
             tokenizer_dir=args.tokenizer_dir,
-            K=args.K,
         )
     elif args.model_kind == "diffusion":
         result = eval_diffusion(
