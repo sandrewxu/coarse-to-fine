@@ -364,6 +364,8 @@ def eval_c2f_bound(
         "total_tokens": int(per_doc_tokens.sum()),
         "nats_per_word": point,
         "nats_per_word_ci95": [lo, hi],
+        "denominator": "text_word",
+        "comparable_to": "neg_log_p_x_per_text_word",
         "mean_joint_nll_p": float(joint_nll_p.mean()),
         "mean_nll_q": float(nll_q.mean()),
         "text_word_count": int(text_word_count),

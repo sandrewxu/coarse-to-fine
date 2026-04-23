@@ -1,9 +1,19 @@
-"""C2F joint-model NLL evaluator.
+"""C2F joint-model *training-loss* evaluator.
 
-Reports the C2F training objective as an IWAE-1 lower bound on ``log p(x)``
-using a gold ``z`` produced by ``q_φ`` (read from the test parquet).
-Tighter IWAE-K (K>1) requires sampling multiple ``z`` per document from
-``q_φ`` and reweighting; the sampler is intentionally deferred.
+Reports ``-log p(x, z_gold) / num_content_tokens`` — the same quantity the C2F
+model minimizes during training, computed on a held-out test set. Useful for
+comparing **C2F variants to each other** (e.g. AR-C2F vs Block-C2F) and for
+catching training-loss regressions; **not** directly comparable to the AR or
+diffusion baselines — those report ``-log p(x) / text_word_count``, which has
+both a different numerator (marginal vs joint) and a different denominator
+(text words vs all content tokens including z).
+
+For a true ELBO upper bound on ``-log p(x) / text_word_count`` that *is*
+comparable to AR/diffusion, use :func:`src.eval.bound.eval_c2f_bound`, which
+adds the ``-log q_φ(z|x)`` correction term required by the IWAE identity.
+
+This evaluator's output dict carries ``comparable_to="joint_train_loss_per_token"``
+so downstream plotting code can refuse to plot it against AR/diffusion.
 """
 
 from pathlib import Path
@@ -177,8 +187,10 @@ def eval_c2f(
         "K": K,
         "num_docs": len(dataset),
         "total_tokens": int(per_doc_tokens.sum()),
-        "nats_per_word": point,
-        "nats_per_word_ci95": [lo, hi],
+        "nats_per_joint_token": point,
+        "nats_per_joint_token_ci95": [lo, hi],
+        "denominator": "joint_content_tokens",
+        "comparable_to": "joint_train_loss_per_token",
         "per_scale_nats_per_token": per_scale_mean,
         "per_doc_rows": rows,
     }

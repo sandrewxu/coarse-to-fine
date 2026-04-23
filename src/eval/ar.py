@@ -126,5 +126,7 @@ def eval_ar(
         "total_tokens": int(per_doc_tokens.sum()),
         "nats_per_word": point,
         "nats_per_word_ci95": [lo, hi],
+        "denominator": "text_word",
+        "comparable_to": "neg_log_p_x_per_text_word",
         "per_doc_rows": rows,
     }
