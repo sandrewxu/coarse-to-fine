@@ -41,10 +41,12 @@ sft = [
 ]
 # Step 5 — local generation with vLLM. vLLM bundles its own flash-attention
 # kernels, so a separate flash-attn install is not required here.
-# Pin matches the working install on Yale HPC (cluster build of vllm with
-# FA2 / CUDA 12.8). Bump deliberately and rebuild.
+# 0.12.0 is the upper bound of verl 0.7.0's declared range and the only version
+# where verl's ExternalZeroMQDistributedExecutor.execute_model is defined (the
+# override is gated on _VLLM_VERSION >= 0.12.0 in verl/workers/rollout/
+# vllm_rollout/vllm_async_server.py). Async rollout silently breaks on <0.12.0.
 generation = [
-    "vllm==0.11.2",
+    "vllm==0.12.0",
 ]
 # Step 6 — C2F model pretraining with HF Trainer + FSDP.
 # liger-kernel is currently unused (the `use_liger` config flag is not wired
