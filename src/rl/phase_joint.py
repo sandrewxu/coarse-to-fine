@@ -64,7 +64,11 @@ def run_joint(
     if extra_overrides:
         overrides.extend(extra_overrides)
 
-    cmd = [sys.executable, "-m", "verl.trainer.main_ppo", *overrides]
+    # main_ppo_with_elbo is a thin wrapper that monkey-patches Tracking.log to
+    # inject ``train/elbo = critic/score/mean + actor/entropy`` so the ELBO
+    # appears as a native W&B metric. Behaviour is otherwise identical to
+    # ``python -m verl.trainer.main_ppo``.
+    cmd = [sys.executable, "-m", "src.rl.main_ppo_with_elbo", *overrides]
     log.info("Joint — REINFORCE on q_φ + MLE on p_θ. Command: %s", " ".join(cmd))
 
     # Materialise the (CLI-overridden) config to a temp YAML so the reward

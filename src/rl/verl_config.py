@@ -127,8 +127,12 @@ def build_verl_grpo_overrides(
         f"++actor_rollout_ref.rollout.max_num_batched_tokens={rl_sft_config.get('rollout_max_num_batched_tokens', 32768)}",
         f"++actor_rollout_ref.rollout.gpu_memory_utilization={rl_sft_config.get('rollout_gpu_memory_utilization', 0.6)}",
         "++actor_rollout_ref.rollout.agent.num_workers=1",
-        "++actor_rollout_ref.actor.use_kl_loss=true",
-        f"++actor_rollout_ref.actor.kl_loss_coef={rl_sft_config.get('kl_coef', 0.01)}",
+        # KL-to-reference regularizer. Off by default (see RlSftConfig.use_kl_loss);
+        # the ELBO's -log q term is provided by entropy_coeff=1.0 (Option B) or
+        # by -ref_nll_coef · log q_ref in the reward (Option A). Flip on only as
+        # an ablation — it isn't part of the REINFORCE-on-ELBO objective.
+        f"++actor_rollout_ref.actor.use_kl_loss={'true' if rl_sft_config.get('use_kl_loss', False) else 'false'}",
+        f"++actor_rollout_ref.actor.kl_loss_coef={rl_sft_config.get('kl_coef', 0.0)}",
         # ELBO entropy term. dp_actor.py:650 does `policy_loss -= entropy * coef`,
         # equivalently adding `coef · H(q_φ)` to the maximization objective. At
         # coef=1.0 the PPO objective becomes E_q[log p_θ(x,z)] + H(q_φ) = ELBO.
@@ -220,6 +224,7 @@ def build_verl_joint_overrides(
         f"++trainer.default_local_dir={checkpoint_dir}",
         f"++trainer.save_freq={rl_joint_config.get('save_freq', 150)}",
         f"++trainer.max_actor_ckpt_to_keep={rl_joint_config.get('max_actor_ckpt_to_keep', 2)}",
+        f"++trainer.resume_mode={rl_joint_config.get('resume_mode', 'auto')}",
         # ── Model ───────────────────────────────────────────────────────────
         f"++actor_rollout_ref.model.path={model_path}",
         "++actor_rollout_ref.actor.fsdp_config.model_dtype=bf16",
@@ -233,12 +238,21 @@ def build_verl_joint_overrides(
         # Validation batch defaults to len(val_dataset) (ray_trainer.py:366-368),
         # which ships the entire val split in one generate_sequences call. Cap.
         f"++data.dataloader_num_workers={rl_joint_config.get('dataloader_num_workers', 4)}",
-        # ── Algorithm: REINFORCE++ (no critic, no KL) ───────────────────────
-        "++algorithm.adv_estimator=reinforce_plus_plus",
+        # ── Algorithm: GRPO (no critic, no KL) ──────────────────────────────
+        # Switched from reinforce_plus_plus → grpo on 2026-04-28 because R++
+        # uses *global* batch-wide mean/std normalization (core_algos.py:613)
+        # while GRPO computes mean/std *within* each prompt group keyed on
+        # prompt index (core_algos.py:307-313). With rollout_n>1 the per-prompt
+        # baseline is the actual variance-reduction lever; R++ + n>1 just gave
+        # √n more independent samples against the global pool. Empirically n=4
+        # under R++ moved score by only ~0.15 nat at step 15 vs n=1; entropy /
+        # grad_norm dynamics were unchanged. Configurable from YAML so the
+        # n=1 R++ debug runs (no per-prompt baseline available) can flip back.
+        f"++algorithm.adv_estimator={rl_joint_config.get('adv_estimator', 'grpo')}",
         "++algorithm.use_kl_in_reward=false",
         # ── Actor / Rollout ─────────────────────────────────────────────────
         "++actor_rollout_ref.rollout.name=vllm",
-        "++actor_rollout_ref.rollout.n=1",
+        f"++actor_rollout_ref.rollout.n={rl_joint_config.get('rollout_n', 1)}",
         f"++actor_rollout_ref.rollout.tensor_model_parallel_size={rollout_tp}",
         f"++actor_rollout_ref.rollout.data_parallel_size={rollout_dp}",
         "++actor_rollout_ref.rollout.pipeline_model_parallel_size=1",

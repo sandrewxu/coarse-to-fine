@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from src.common.constants import VLLM_MAX_MODEL_LEN
 from src.common.logging import get_logger
 
 log = get_logger(__name__)
@@ -94,7 +95,6 @@ def train_sft(
         dtype=torch.bfloat16,
         trust_remote_code=True,
     )
-    model.gradient_checkpointing_enable()
 
     log.info("Loading data: %s", data_path)
     train_ds = load_dataset("parquet", data_files=str(data_path.resolve()), split="train")
@@ -152,7 +152,6 @@ def train_sft(
         save_total_limit=3,
         report_to="wandb" if wandb_enabled else "none",
         run_name=os.environ.get("WANDB_NAME") or "sft-qwen3-4b",
-        gradient_checkpointing=True,
         seed=seed,
     )
 
@@ -175,8 +174,10 @@ def train_sft(
     trainer.train(resume_from_checkpoint=resume_from)
     # Cap max_position_embeddings on the saved config so downstream consumers
     # (vLLM rollout in step 7, HF generation in step 5) don't inherit
-    # Qwen3-4B's 40960 default and over-reserve KV cache.
-    model.config.max_position_embeddings = max_length
+    # Qwen3-4B's 40960 default and over-reserve KV cache. Must be >=
+    # VLLM_MAX_MODEL_LEN so vLLM's max_model_len is accepted at load time —
+    # max_length bounds training truncation, not generation sequence length.
+    model.config.max_position_embeddings = max(max_length, VLLM_MAX_MODEL_LEN)
     trainer.save_model()
     tokenizer.save_pretrained(str(checkpoint_dir))
     log.info("Model saved to: %s", checkpoint_dir)

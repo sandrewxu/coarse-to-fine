@@ -65,7 +65,9 @@ class DataPrepConfig(BaseModel):
 
 
 class DatasetConfig(BaseModel):
-    output_dir: str = "data/verified/latent_generation_10k_v1"
+    # Script 03 appends ``batch.run_tag`` to this at write time, so the final
+    # stats path is ``{output_dir}/{run_tag}/verification_stats.json``.
+    output_dir: str = "data/verified"
     data_dir: str = "data/tinystoriesv2_shuffled"
     dataset_name: str = "tinystoriesv2"
     num_chunks: int = 8
@@ -233,7 +235,14 @@ class RlSftConfig(BaseModel):
     train_batch_size: int = 64
     temperature: float = 1.0
     lr: float = 1.0e-6
-    kl_coef: float = 0.01
+    # ── KL-to-reference regularizer (separate from ELBO) ────────────────────
+    # This is veRL's ``actor.use_kl_loss`` / ``kl_loss_coef`` knob, a stability
+    # regularizer ``+ coef · KL(q_φ ∥ q_ref)`` on the actor loss. It is NOT
+    # part of the ELBO — the ELBO's -log q_φ term lives in the entropy bonus
+    # (Option B) or in the reward's -log q_ref term (Option A, opt-in). Off by
+    # default: pure REINFORCE-on-ELBO. Flip to True only as an ablation.
+    use_kl_loss: bool = False
+    kl_coef: float = 0.0
     format_bonus_weight: float = 0.1
     # ── ELBO entropy term (preferred path, "Option B") ──────────────────────
     # veRL's actor loss subtracts ``entropy_coeff · H(q_φ)`` from the loss,
@@ -293,7 +302,10 @@ class JointConfig(BaseModel):
     c2f_model_path: str = "checkpoints/decoder"
     c2f_lr: float = 1e-4
     c2f_weight_decay: float = 0.01
-    c2f_save_steps: int = 20000
+    # Save the C2F decoder every N RL steps (matches trainer.save_freq semantics
+    # for the actor). Implementation in src/rl/reward_joint.py converts to a
+    # per-sample threshold using train_batch_size × rollout_n.
+    c2f_save_steps: int = 50
     c2f_save_dir: str = "checkpoints/rl/joint/c2f"
     c2f_mask_type: str = "causal"
     num_gpus: int = 1
@@ -321,11 +333,33 @@ class JointConfig(BaseModel):
     rollout_gpu_memory_utilization: float = 0.6
     rollout_max_num_seqs: int = 256
     rollout_max_num_batched_tokens: int = 32768
+    # Number of rollout samples per prompt. n=1 is plain REINFORCE++; n>1
+    # enables a within-prompt baseline (GRPO-style) which reduces advantage
+    # variance, the standard fix for the policy gradient being drowned by the
+    # entropy bonus under entropy_coeff=1.0. Total sequences per step =
+    # train_batch_size × rollout_n, so step time scales with rollout_n.
+    rollout_n: int = 1
     # Rollout parallelism split: TP × DP must equal num_gpus. TP=1 is right for
     # small actors (<=13B) where TP all-reduces dominate per-layer compute.
     # DP=None → num_gpus // tp (full data-parallel rollout).
     rollout_tensor_parallel_size: int = 1
     rollout_data_parallel_size: int | None = None
+    # veRL trainer.resume_mode. "auto" (default) picks up from the latest
+    # checkpoint in checkpoint_dir; "disable" starts fresh. Set to "disable"
+    # for throughput sweeps where each probe must be independent — otherwise
+    # global_step accumulates across probes and total_training_steps becomes
+    # ambiguous.
+    resume_mode: str = "auto"
+    # Advantage estimator for veRL. "grpo" computes per-prompt baselines (good
+    # when rollout_n>1); "reinforce_plus_plus" uses a global batch-wide baseline.
+    # See verl/trainer/ppo/core_algos.py for the per-estimator math.
+    adv_estimator: str = "grpo"
+    # Rollout-debug knobs read by JointC2FRewardManager.run_single. The first
+    # ``debug_dump_initial`` samples per worker get logged unconditionally,
+    # then every ``debug_dump_every``-th sample after that. Set
+    # ``debug_dump_every=0`` to disable the post-warmup cadence.
+    debug_dump_initial: int = 10
+    debug_dump_every: int = 1000
 
 
 class RlConfig(BaseModel):

@@ -1,0 +1,129 @@
+# H200 8-GPU — Step 7 joint RL on the causal C2F decoder, REINFORCE++ n=1.
+#
+# Same objective as H200_joint_causal.yaml (pure ELBO via entropy_coeff=1.0)
+# but with the simplest policy gradient: no per-prompt baseline (rollout_n=1)
+# and a global batch-wide mean/std normalization (adv_estimator=reinforce_plus_plus).
+#
+# Why this run: the GRPO n=4 and R++ n=4 runs both showed entropy climbing /
+# mean reward dropping. n=4 makes step time ~4× and *masks* what individual
+# rollouts look like. n=1 gives us 4× more distinct prompts per step at the
+# same wall-clock budget, plus the reward-debug logging in
+# JointC2FRewardManager.run_single dumps a steady stream of (z₄..z₁, reward)
+# tuples to logs/rl/joint/* for eyeball diagnosis of how rollouts degrade.
+#
+# ── Launch ────────────────────────────────────────────────────────────────
+#   sbatch --export=ALL,CONFIG=config/H200_joint_causal_rpp_n1.yaml \
+#       scripts/slurm_07_rl.sh
+#
+# Differences vs H200_joint_causal.yaml are tagged ── R++ n=1 ──.
+
+scale_lengths: [2, 4, 8, 16, 32]
+num_gpus: 8
+seed: 42
+
+wandb:
+  group: "latent-generation"
+  tags: ["qwen3-4b", "h200", "causal", "joint", "elbo", "reinforce++", "n1"]
+
+dataset:
+  data_dir: "data/tinystoriesv2_shuffled"
+  dataset_name: "tinystoriesv2"
+
+generation:
+  model_path: "checkpoints/sft/checkpoint-2336"
+  chunks: [0]
+
+rl:
+  sft_rl:
+    model_path: "checkpoints/sft/checkpoint-2336"
+  c2f_finetune:
+    model_path: "checkpoints/decoder_causal"
+
+  joint:
+    # ── Models ─────────────────────────────────────────────────────────────
+    model_path: "checkpoints/sft/checkpoint-2336"
+    c2f_model_path: "checkpoints/decoder_causal"
+    c2f_mask_type: "causal"
+
+    # ── Output (separate dir from GRPO n=4 so checkpoints don't collide) ──
+    checkpoint_dir: "checkpoints/rl/joint_causal_rpp_n1"
+    c2f_save_dir: "checkpoints/rl/joint_causal_rpp_n1/c2f"
+
+    # ── Rollout ────────────────────────────────────────────────────────────
+    rollout_tensor_parallel_size: 1
+    rollout_data_parallel_size: 8
+    rollout_gpu_memory_utilization: 0.65
+    rollout_max_num_seqs: 2048
+    rollout_max_num_batched_tokens: 65536
+
+    # ── R++ n=1 ──────────────────────────────────────────────────────────
+    adv_estimator: "reinforce_plus_plus"
+    rollout_n: 1
+
+    # ── Batch / step budget ───────────────────────────────────────────────
+    train_batch_size: 4096
+    ppo_micro_batch_size_per_gpu: 64
+    c2f_micro_batch_size: 256
+    epochs: 1
+    save_freq: 50
+    c2f_save_steps: 50
+    c2f_keep_last_n: 3
+
+    # ── Sequence lengths ──────────────────────────────────────────────────
+    max_prompt_length: 256
+    max_response_length: 256
+
+    # ── Objective: pure ELBO REINFORCE ───────────────────────────────────
+    entropy_coeff: 1.0
+    malformed_reward: -10.0
+    lr: 1.0e-6
+    c2f_lr: 1.0e-5
+    c2f_weight_decay: 0.01
+    temperature: 1.0
+
+    # ── R++ n=1 ── Rollout debug logging ─────────────────────────────────
+    # First 10 samples + every 500 thereafter. With train_batch_size=4096
+    # and rollout_n=1 that's ~10 + 8/step debug dumps per worker.
+    debug_dump_initial: 10
+    debug_dump_every: 500
+
+c2f_training:
+  fsdp: ""
+  hidden_size: 512
+  intermediate_size: 2048
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  num_hidden_layers: 8
+  mask_type: "causal"
+  checkpoint_dir: "checkpoints/decoder_causal"
+  tokenizer_dir: "checkpoints/tokenizer"
+  per_device_batch_size: 512
+  eval_batch_size: 2048
+  gradient_accumulation_steps: 1
+
+ar_training:
+  fsdp: ""
+  hidden_size: 512
+  intermediate_size: 2048
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  num_hidden_layers: 8
+  checkpoint_dir: "checkpoints/ar_baseline"
+  per_device_batch_size: 512
+  eval_batch_size: 2048
+  gradient_accumulation_steps: 1
+
+diffusion_training:
+  fsdp: ""
+  hidden_size: 512
+  intermediate_size: 2048
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  num_hidden_layers: 8
+  checkpoint_dir: "checkpoints/diffusion_baseline"
+  per_device_batch_size: 512
+  eval_batch_size: 2048
+  gradient_accumulation_steps: 1

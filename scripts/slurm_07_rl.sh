@@ -2,10 +2,10 @@
 #SBATCH --job-name=rl_joint
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus=h200:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
-#SBATCH --time=12:00:00
+#SBATCH --gpus=h200:8
+#SBATCH --cpus-per-task=64
+#SBATCH --mem=512G
+#SBATCH --time=24:00:00
 #SBATCH --partition=gpu
 #SBATCH --output=logs/rl/joint/slurm_%j.out
 #SBATCH --error=logs/rl/joint/slurm_%j.err

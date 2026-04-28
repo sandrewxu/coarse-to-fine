@@ -64,9 +64,32 @@ class JointC2FRewardManager(RewardManagerBase):
         self.malformed_reward: float = float(joint_cfg.get("malformed_reward", -10.0))
         c2f_lr: float = float(joint_cfg.get("c2f_lr", 1e-4))
         c2f_wd: float = float(joint_cfg.get("c2f_weight_decay", 0.01))
-        self._save_steps: int = int(joint_cfg.get("c2f_save_steps", 100))
+        # ``c2f_save_steps`` is denominated in *RL steps* (matching trainer.save_freq
+        # semantics), not in reward-manager calls. veRL doesn't pass the RL step
+        # number to run_single, so we convert: each RL step processes
+        # ``train_batch_size × rollout_n`` samples through this reward manager.
+        # We track a per-sample threshold and a "last save sample count" so we
+        # save once the next RL-step boundary is crossed, robust to any minor
+        # batching variance in how veRL dispatches reward calls.
+        self._save_every_rl_steps: int = int(joint_cfg.get("c2f_save_steps", 100))
+        self._samples_per_rl_step: int = max(
+            1,
+            int(joint_cfg.get("train_batch_size", 256))
+            * int(joint_cfg.get("rollout_n", 1)),
+        )
+        self._save_every_samples: int = (
+            self._save_every_rl_steps * self._samples_per_rl_step
+        )
+        self._last_save_step: int = 0
         self._keep_last_n: int = int(joint_cfg.get("c2f_keep_last_n", 3))
         self._micro_bs: int = int(joint_cfg.get("c2f_micro_batch_size", 32))
+        # Rollout-debug: dump the first ``debug_dump_initial`` samples and
+        # then every ``debug_dump_every``-th sample after that, with parsed
+        # layers + reward, so we can eyeball how q_φ rollouts degrade as
+        # entropy climbs / reward drops. Sample counters are per-worker.
+        self._debug_dump_initial: int = int(joint_cfg.get("debug_dump_initial", 10))
+        self._debug_dump_every: int = int(joint_cfg.get("debug_dump_every", 1000))
+        self._sample_counter: int = 0
 
         save_dir_base = Path(joint_cfg.get("c2f_save_dir", "checkpoints/rl/joint/c2f"))
         self._save_dir = save_dir_base / f"worker_{os.getpid()}"
@@ -130,7 +153,8 @@ class JointC2FRewardManager(RewardManagerBase):
         return (per_token_loss * mask).sum(dim=1) / num_tokens
 
     def _save_checkpoint(self) -> None:
-        save_path = self._save_dir / f"step_{self._step}"
+        rl_step = self._step // self._samples_per_rl_step
+        save_path = self._save_dir / f"step_{rl_step}"
         try:
             save_path.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -274,23 +298,33 @@ class JointC2FRewardManager(RewardManagerBase):
         data.batch["token_level_scores"] = reward_tensor
 
         # ── Logging + checkpointing ────────────────────────────────────────
-        self._step += 1
+        # ``_step`` is total samples-seen across both paths (run_single
+        # increments per sample, __call__ per batch); the legacy path adds
+        # batch_size so the derived RL-step in _save_checkpoint stays correct.
+        self._step += batch_size
         avg_reward = per_sample_reward.mean().item() if per_sample_reward is not None else 0.0
         avg_loss = p_loss.item() if p_loss is not None else 0.0
         log.info(
-            "[Joint] step=%d valid=%d/%d p_loss=%.4f reward=%.4f",
+            "[Joint] samples=%d valid=%d/%d p_loss=%.4f reward=%.4f",
             self._step,
             num_valid,
             batch_size,
             avg_loss,
             avg_reward,
         )
-        if self._step % self._save_steps == 0:
+        if self._step - self._last_save_step >= self._save_every_samples:
+            self._last_save_step = self._step
             self._save_checkpoint()
 
         if return_dict:
             return {"reward_tensor": reward_tensor}
         return data
+
+    def _should_debug_dump(self, n: int) -> bool:
+        """Whether sample ``n`` (1-indexed) lands on a debug-dump tick."""
+        if n <= self._debug_dump_initial:
+            return True
+        return self._debug_dump_every > 0 and (n % self._debug_dump_every == 0)
 
     async def run_single(self, data) -> dict:
         c = self.components
@@ -308,25 +342,29 @@ class JointC2FRewardManager(RewardManagerBase):
         rm = nt.get("reward_model")
         gt = rm.get("ground_truth", "") if isinstance(rm, dict) else nt.get("ground_truth", "")
 
-        if not getattr(type(self), "_debug_dumped", False):
-            type(self)._debug_dumped = True
-            log.debug(
-                "first sample (validate=%s): response (len=%d) %r | ground_truth (len=%d) %r",
-                is_validate,
-                len(response_str),
-                response_str[:800],
-                len(str(gt)),
-                str(gt)[:300],
-            )
+        # Train-side counter; validation samples don't tick it (we want the
+        # cadence tied to optimization progress, not eval cadence).
+        if not is_validate:
+            self._sample_counter += 1
+        sample_n = self._sample_counter
+        debug_now = (not is_validate) and self._should_debug_dump(sample_n)
 
         layer_contents = parse_layers(
             response_str, c.word_count_constraints, strict=c.strict_word_count
         )
         if layer_contents is None:
+            if debug_now:
+                log.info(
+                    "[rollout-debug] sample=%d MALFORMED | response[:800]=%r | gt[:200]=%r",
+                    sample_n,
+                    response_str[:800],
+                    str(gt)[:200],
+                )
             return {
                 "reward_score": float(self.malformed_reward),
                 "reward_extra_info": {
                     "p_loss": 0.0,
+                    "log_p": 0.0,
                     "malformed": 1.0,
                     "validate": 1.0 if is_validate else 0.0,
                 },
@@ -348,13 +386,36 @@ class JointC2FRewardManager(RewardManagerBase):
                 sample_loss.backward()
                 self.optimizer.step()
                 self._step += 1
-                if self._step % self._save_steps == 0:
+                if self._step - self._last_save_step >= self._save_every_samples:
+                    self._last_save_step = self._step
                     self._save_checkpoint()
+
+        if debug_now:
+            log.info(
+                "[rollout-debug] sample=%d reward=%.4f p_loss=%.4f | "
+                "z4=%r z3=%r z2=%r z1=%r | gt[:200]=%r",
+                sample_n,
+                reward,
+                float(sample_loss.detach().cpu().item()),
+                layer_contents[0],
+                layer_contents[1],
+                layer_contents[2],
+                layer_contents[3],
+                str(gt)[:200],
+            )
 
         return {
             "reward_score": float(reward),
             "reward_extra_info": {
+                # ELBO tracking: log_p is the first ELBO term ``E_q[log p(x,z)]``.
+                # The second term H(q_φ) is logged separately by veRL as
+                # ``actor/entropy``. Under Option A (entropy_coeff=1.0) the
+                # optimization target is log_p + H(q); construct the ELBO W&B
+                # panel as ``reward_extra_info/log_p + actor/entropy × resp_len``.
+                # Train-side lands in ``reward_extra_info/log_p/mean``; val-side
+                # lands in ``val-aux/*/log_p/mean`` via process_validation_metrics.
                 "p_loss": float(sample_loss.detach().cpu().item()),
+                "log_p": float(reward),
                 "malformed": 0.0,
                 "validate": 1.0 if is_validate else 0.0,
             },

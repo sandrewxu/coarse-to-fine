@@ -22,30 +22,100 @@ def _apply_chat_template(tokenizer, prompts: list[str]) -> list[str]:
 
 
 def _vllm_worker(
-    gpu_id: int, model_path: str, prompts: list[str], sampling_kwargs: dict, seed: int, result_queue
+    dp_rank: int,
+    dp_size: int,
+    dp_master_ip: str,
+    dp_master_port: int,
+    model_path: str,
+    prompts: list[str],
+    sampling_kwargs: dict,
+    seed: int,
+    result_queue,
 ) -> None:
-    """Run vLLM on a single GPU. Puts (gpu_id, results) on the queue."""
+    """Run a single vLLM engine as DP rank `dp_rank` of `dp_size`.
+
+    Follows vllm/examples/offline_inference/data_parallel.py: each rank sets
+    VLLM_DP_* env vars before LLM init, and vLLM coordinates CUDA device
+    assignment + collective init across ranks via the master IP/port rendezvous.
+    For dp_size==1 we skip DP env vars and pin to GPU 0 manually.
+    """
     import os
+    import time
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    if dp_size > 1:
+        os.environ["VLLM_DP_RANK"] = str(dp_rank)
+        os.environ["VLLM_DP_RANK_LOCAL"] = str(dp_rank)
+        os.environ["VLLM_DP_SIZE"] = str(dp_size)
+        os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
+        os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
+    else:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-    from vllm import LLM, SamplingParams
+    import sys
+    import traceback
 
-    from src.common.constants import VLLM_MAX_MODEL_LEN, VLLM_MAX_NUM_SEQS
+    texts: list[str] = []
+    try:
+        from vllm import LLM, SamplingParams
 
-    llm = LLM(
-        model=model_path,
-        seed=seed,
-        trust_remote_code=True,
-        max_model_len=VLLM_MAX_MODEL_LEN,
-        max_num_seqs=VLLM_MAX_NUM_SEQS,
-        gpu_memory_utilization=0.9,
-    )
-    sampling_params = SamplingParams(**sampling_kwargs)
-    tokenizer = llm.get_tokenizer()
-    formatted = _apply_chat_template(tokenizer, prompts)
-    outputs = llm.generate(formatted, sampling_params)
-    result_queue.put((gpu_id, [o.outputs[0].text for o in outputs]))
+        from src.common.constants import VLLM_MAX_MODEL_LEN, VLLM_MAX_NUM_SEQS
+
+        llm = LLM(
+            model=model_path,
+            seed=seed,
+            trust_remote_code=True,
+            tensor_parallel_size=1,
+            max_model_len=VLLM_MAX_MODEL_LEN,
+            max_num_seqs=VLLM_MAX_NUM_SEQS,
+            gpu_memory_utilization=0.9,
+        )
+        sampling_params = SamplingParams(**sampling_kwargs)
+        tokenizer = llm.get_tokenizer()
+        # vLLM rejects any prompt longer than max_model_len at input validation.
+        # Drop over-length prompts so the batch survives; return "" for their
+        # positions to keep the output list 1-1 with the input.
+        max_prompt_tokens = VLLM_MAX_MODEL_LEN - sampling_kwargs["max_tokens"]
+        formatted_all = _apply_chat_template(tokenizer, prompts)
+        keep_mask = [
+            len(tokenizer(t, add_special_tokens=False)["input_ids"]) <= max_prompt_tokens
+            for t in formatted_all
+        ]
+        dropped = sum(1 for k in keep_mask if not k)
+        if dropped:
+            print(
+                f"[DP rank {dp_rank}] skipping {dropped}/{len(prompts)} prompts "
+                f"over {max_prompt_tokens} tokens",
+                flush=True,
+            )
+        formatted = [t for t, k in zip(formatted_all, keep_mask, strict=True) if k]
+        outputs = llm.generate(formatted, sampling_params)
+        gen_texts = iter(o.outputs[0].text for o in outputs)
+        texts = [next(gen_texts) if k else "" for k in keep_mask]
+    except BaseException:
+        # Print with rank prefix so the user can tell which engine failed.
+        print(f"[DP rank {dp_rank}] worker crashed:", file=sys.stderr, flush=True)
+        traceback.print_exc()
+    finally:
+        # Always unblock the parent's queue.get(), even on failure.
+        try:
+            result_queue.put((dp_rank, texts))
+        except BaseException:
+            traceback.print_exc()
+        # vLLM docs: give engines a moment to pause their loops before exit.
+        time.sleep(1)
+        # Kill the EngineCore subprocess so the fork-inherited sentinel FD
+        # closes — otherwise main's p.join() hangs forever on select().
+        import contextlib
+        import signal
+        from pathlib import Path
+
+        for path in Path(f"/proc/{os.getpid()}/task").glob("*/children"):
+            with contextlib.suppress(OSError), path.open() as f:
+                for pid in f.read().split():
+                    with contextlib.suppress(OSError, ValueError):
+                        os.kill(int(pid), signal.SIGKILL)
+        # Skip Python atexit to avoid vLLM V1 teardown deadlock on _MPClient join.
+        os._exit(0)
 
 
 def generate_vllm(
@@ -60,7 +130,19 @@ def generate_vllm(
     repetition_penalty: float = 1.0,
     seed: int = 42,
 ) -> list[str]:
-    """Generate using vLLM (high-throughput batched inference)."""
+    """Generate using vLLM with native data parallelism across ``num_gpus`` GPUs.
+
+    Spawns one engine subprocess per DP rank. Ranks share a master IP/port so
+    vLLM can coordinate init and collective ops — the failure mode we hit
+    before (silent ZMQ-drop on one rank) came from running 8 *uncoordinated*
+    LLM instances, which vLLM doesn't support. Placeholder prompts are fed to
+    ranks whose slice of ``prompts`` is empty, because every DP rank must call
+    ``.generate()`` or the group hangs.
+    """
+    import multiprocessing as mp
+
+    mp.set_start_method("spawn", force=True)
+
     sampling_kwargs = dict(
         max_tokens=max_tokens,
         temperature=temperature,
@@ -69,44 +151,67 @@ def generate_vllm(
         repetition_penalty=repetition_penalty,
     )
 
-    if num_gpus <= 1:
-        import multiprocessing as mp
+    if num_gpus > 1:
+        from vllm.utils import get_open_port
 
-        mp.set_start_method("spawn", force=True)
-        queue = mp.Queue()
-        _vllm_worker(0, model_path, prompts, sampling_kwargs, seed, queue)
-        _, results = queue.get()
-        return results
+        dp_master_ip = "127.0.0.1"
+        dp_master_port = get_open_port()
+    else:
+        dp_master_ip = ""
+        dp_master_port = 0
 
-    # Data parallelism: split prompts across GPUs using non-daemon Process
-    import multiprocessing as mp
+    per_rank = (len(prompts) + num_gpus - 1) // num_gpus
+    prompt_chunks: list[list[str]] = []
+    for rank in range(num_gpus):
+        chunk = prompts[rank * per_rank : (rank + 1) * per_rank]
+        if not chunk:
+            chunk = ["placeholder"]
+        prompt_chunks.append(chunk)
 
-    mp.set_start_method("spawn", force=True)
+    log.info(
+        f"  vLLM DP={num_gpus}: {len(prompts)} prompts"
+        + (f" (master {dp_master_ip}:{dp_master_port})" if num_gpus > 1 else "")
+    )
 
-    chunk_size = (len(prompts) + num_gpus - 1) // num_gpus
-    prompt_chunks = [prompts[i : i + chunk_size] for i in range(0, len(prompts), chunk_size)]
-
-    log.info(f"  Data-parallel: splitting {len(prompts)} prompts across {len(prompt_chunks)} GPUs")
     result_queue = mp.Queue()
     procs = []
-    for gpu_id, chunk in enumerate(prompt_chunks):
+    for rank, chunk in enumerate(prompt_chunks):
         p = mp.Process(
             target=_vllm_worker,
-            args=(gpu_id, model_path, chunk, sampling_kwargs, seed, result_queue),
+            args=(
+                rank,
+                num_gpus,
+                dp_master_ip,
+                dp_master_port,
+                model_path,
+                chunk,
+                sampling_kwargs,
+                seed,
+                result_queue,
+            ),
         )
         p.start()
         procs.append(p)
 
-    # Collect results in gpu_id order
-    collected = {}
+    collected: dict[int, list[str]] = {}
     for _ in procs:
-        gpu_id, texts = result_queue.get()
-        collected[gpu_id] = texts
+        rank, texts = result_queue.get()
+        collected[rank] = texts
 
     for p in procs:
-        p.join()
+        p.join(timeout=300)
+        if p.exitcode is None:
+            log.warning(f"  Killing non-exiting DP worker pid={p.pid}")
+            p.kill()
 
-    return [text for gpu_id in sorted(collected) for text in collected[gpu_id]]
+    # Drop placeholder outputs from ranks whose original slice was empty.
+    out: list[str] = []
+    for rank in range(num_gpus):
+        start = rank * per_rank
+        if start >= len(prompts):
+            continue
+        out.extend(collected[rank])
+    return out
 
 
 def generate_hf(

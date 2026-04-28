@@ -1,41 +1,132 @@
-# H200 (141 GB) — step 6 causal decoder, step 7 joint RL with causal mask.
+# H200 8-GPU — Step 7 joint RL on the causal C2F decoder.
+#
+# Objective: pure ELBO. REINFORCE++ on q_φ + per-step MLE on p_θ inside the
+# JointC2FRewardManager. The maximization target is
+#
+#     E_q[log p_θ(x, z)]  +  H(q_φ)   ==   ELBO,
+#
+# achieved by entropy_coeff=1.0 (the H(q_φ) term is added to the actor loss
+# in dp_actor.py:650). No KL-to-reference penalty (use_kl_loss=false,
+# hardcoded for the joint phase in src/rl/verl_config.py:262). No extra
+# entropy bonus on top of the ELBO term — entropy_coeff is precisely the
+# H(q) term, not an additional regularizer.
+#
+# Posterior collapse is the *expected* outcome: q_φ collapses to degenerate
+# latents and p_θ becomes a plain LM over x. We are trying to *observe* that.
+#
+# ── Launch ────────────────────────────────────────────────────────────────
+#   sbatch scripts/slurm_07_rl.sh                       # full run (interactive: bash)
+#
+#   # Smoke test (2 RL steps, tiny batch, no validation):
+#   bash scripts/slurm_07_rl.sh \
+#       rl.joint.train_batch_size=64 \
+#       rl.joint.ppo_micro_batch_size_per_gpu=8 \
+#       rl.joint.c2f_micro_batch_size=64 \
+#       rl.joint.rollout_max_num_seqs=64 \
+#       rl.joint.rollout_gpu_memory_utilization=0.4 \
+#       ++trainer.total_training_steps=2 \
+#       ++trainer.test_freq=99999
+#
+# ── Known risk: DP=8, TP=1 rollout ────────────────────────────────────────
+# verl 0.7.x gates DP propagation on expert_parallel_size > 1 (PR #5609).
+# Without patches/verl_5609_dp_fix.patch + patches/vllm_dp_external_executor_fix.patch
+# the rollout will likely (a) silently fall back to DP=1, or (b) trip
+# vllm's `local_rank < cuda.device_count()` assert. We're starting here
+# intentionally to confirm today's failure surface; if it crashes we'll
+# debug rather than auto-applying the patches.
+
 scale_lengths: [2, 4, 8, 16, 32]
+num_gpus: 8
+seed: 42
 
 wandb:
   group: "latent-generation"
-  tags: ["qwen3-4b", "h200", "causal"]
+  tags: ["qwen3-4b", "h200", "causal", "joint", "elbo"]
 
 dataset:
   data_dir: "data/tinystoriesv2_shuffled"
   dataset_name: "tinystoriesv2"
-  rl_split: "tinystoriesv2.rl_subset_384k_chunk7.jsonl"
+  # Defaults: rl_split=tinystoriesv2.rl.jsonl (256k), val_split=tinystoriesv2.val.jsonl (2k).
 
-sft:
-  prompt_data: "data/prompt_data/gpt-5-nano-2025-08-07/docs_0000100000/gemini-3-pro-7/latent-generation/sft.jsonl"
-
+# Step 5 paths kept current so we can re-generate decoder data if needed.
 generation:
-  model_path: "checkpoints/sft/checkpoint-1172"
+  model_path: "checkpoints/sft/checkpoint-2336"
   chunks: [0]
 
 rl:
+  # Phase A / B paths kept for completeness; not used by --phase joint.
   sft_rl:
-    model_path: "checkpoints/sft/checkpoint-1172"
+    model_path: "checkpoints/sft/checkpoint-2336"
   c2f_finetune:
     model_path: "checkpoints/decoder_causal"
+
   joint:
-    model_path: "checkpoints/sft/checkpoint-1172"
+    # ── Models ─────────────────────────────────────────────────────────────
+    model_path: "checkpoints/sft/checkpoint-2336"
     c2f_model_path: "checkpoints/decoder_causal"
     c2f_mask_type: "causal"
-    c2f_lr: 1.0e-4
+
+    # ── Output ─────────────────────────────────────────────────────────────
     checkpoint_dir: "checkpoints/rl/joint_causal"
     c2f_save_dir: "checkpoints/rl/joint_causal/c2f"
-    train_batch_size: 256
-    ppo_micro_batch_size_per_gpu: 128
+
+    # ── Rollout: vLLM DP=8 × TP=1 (small actor, dense, fits per-GPU) ──────
+    # If this trips the verl/vllm DP plumbing bug, fall back to TP=8 / DP=1
+    # by setting rollout_tensor_parallel_size=8 and rollout_data_parallel_size=1.
+    #
+    # Throughput-tuned 2026-04-27 from sweeps v1–v3 (logs/rl/joint/sweep_*).
+    # KV cache per token (Qwen3-4B BF16, 36 L × 8 KV heads × 128 head_dim) = 144 KB,
+    # so each max_model_len=512 slot costs 73.7 MB. At util=0.65 vLLM gets ~94 GB,
+    # weights+overhead ~13 GB → ~80 GB KV pool ≈ 1090 slots/rank, comfortably above
+    # the 512 active seqs/rank required by train_batch_size=4096 at DP=8. Empirical
+    # gen-throughput scaling is sub-linear past batch=4096, so further bumps don't
+    # pay for themselves.
+    rollout_tensor_parallel_size: 1
+    rollout_data_parallel_size: 8
+    rollout_gpu_memory_utilization: 0.65
+    rollout_max_num_seqs: 2048
+    rollout_max_num_batched_tokens: 65536
+    # n>1 enables a within-prompt baseline (GRPO-style) that reduces advantage
+    # variance, which is the standard fix for the REINFORCE policy gradient
+    # being drowned by the analytic-entropy gradient under entropy_coeff=1.0.
+    # Total seqs/step = train_batch_size × rollout_n, so step time scales ~n×.
+    rollout_n: 4
+
+    # ── Batch / step budget ───────────────────────────────────────────────
+    # 8 GPUs × 512 prompts/GPU = 4096 prompts/step.
+    # 256k / 4096 ≈ 62.5 steps/epoch. With save_freq=100 below, that's ~1.6
+    # epochs per actor checkpoint — bump save_freq down (e.g. 25–50) if you
+    # want finer-grained checkpoints over the run.
+    train_batch_size: 4096
+    ppo_micro_batch_size_per_gpu: 64     # grad-accum = 4096 / (8 × 64) = 8
     c2f_micro_batch_size: 256
     epochs: 1
-    rollout_gpu_memory_utilization: 0.45
-num_gpus: 1
+    save_freq: 100
+    c2f_save_steps: 100
+    c2f_keep_last_n: 3
 
+    # ── Sequence lengths ──────────────────────────────────────────────────
+    max_prompt_length: 256
+    max_response_length: 256
+
+    # ── Objective: pure ELBO REINFORCE ───────────────────────────────────
+    # entropy_coeff=1.0 → policy_loss -= 1.0·H(q) → adds H(q) to objective.
+    # use_kl_loss/use_kl_in_reward are pinned False for joint in verl_config.py.
+    entropy_coeff: 1.0
+    malformed_reward: -10.0
+    lr: 1.0e-6
+    # c2f_lr lowered 2026-04-28 from 1e-4 → 1e-5 after the first full run showed
+    # c2f catastrophic forgetting (score sliding below the marginal-LM floor)
+    # under the original 100× actor:c2f LR ratio. The c2f optimizer was racing
+    # the actor's drift, overfitting to noisy z, weakening the reward signal,
+    # and amplifying the entropy-bonus runaway. 10× ratio (1e-6 vs 1e-5) keeps
+    # c2f stable enough that the reward gradient stays informative.
+    c2f_lr: 1.0e-5
+    c2f_weight_decay: 0.01
+    temperature: 1.0
+
+# Step-6 architecture pinned for the eval scripts (08_eval_joint, 09_eval_nll)
+# so they can re-instantiate the same C2F head we trained.
 c2f_training:
   fsdp: ""
   hidden_size: 512
@@ -51,8 +142,6 @@ c2f_training:
   eval_batch_size: 2048
   gradient_accumulation_steps: 1
 
-# Step 6b: no-latents AR baseline. Architecture matched to c2f_training so
-# scripts/09_eval_nll.py can directly compare nats/word against decoder_causal.
 ar_training:
   fsdp: ""
   hidden_size: 512
@@ -66,8 +155,6 @@ ar_training:
   eval_batch_size: 2048
   gradient_accumulation_steps: 1
 
-# Step 6c: MDLM-style masked-diffusion baseline. Architecture matched to
-# c2f_training. Reuses [UNK] from the c2f tokenizer as the MASK index.
 diffusion_training:
   fsdp: ""
   hidden_size: 512

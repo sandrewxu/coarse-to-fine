@@ -1,0 +1,134 @@
+# H200 single-node config — full pipeline on 40k GPT-5-nano SFT prompts.
+# Deltas from src/config.py defaults; inherits everything else.
+#
+# Intended use:
+#   python scripts/00_prepare_data.py  --config config/H200.yaml
+#   python scripts/01_create_batch_requests.py --config config/H200.yaml
+#   python scripts/02_submit_batch.py  --config config/H200.yaml --input <step1-output>.jsonl --monitor
+#   python scripts/03_verify_outputs.py --config config/H200.yaml --input <step2-output>.jsonl
+#   python scripts/04_sft_train.py      --config config/H200.yaml --data data/sft_dataset/train.parquet
+#   python scripts/05_generate_local.py --config config/H200.yaml --chunks 0
+#   python scripts/06_train_decoder.py  --config config/H200.yaml --data data/local_generations/c2f_train.parquet
+#   python scripts/07_rl_train.py       --config config/H200.yaml --phase joint
+#
+# Top-level num_gpus is 1 (single-H200 baseline). For multi-GPU runs, launch
+# with `accelerate launch --num_processes=N` — src/config.py's propagation
+# overwrites per-section num_gpus with the top-level value, so the CLI is the
+# cleanest way to vary GPU count per step.
+
+scale_lengths: [2, 4, 8, 16, 32]
+num_gpus: 1
+seed: 42
+
+wandb:
+  group: "latent-generation"
+  tags: ["qwen3-4b", "h200"]
+
+# Step 1–2: OpenAI Batch API for teacher-generated latent hierarchies.
+batch:
+  run_tag: "latent_generation_40k_v1"
+
+# Step 0 — one chunk, k_* values are the final split sizes (not ×num_chunks).
+# k_prompt=40k: full SFT budget (will submit all 40k to GPT-5-nano batch API).
+# k_rl=256k  : paired with rl.joint.epochs=3 → 3,000 steps, matching past
+#               64k×12ep recipe but with 4× more prompt diversity.
+data_prep:
+  num_chunks: 1
+  k_prompt: 40000
+  k_validation: 2000
+  k_test: 5000
+  k_rl: 256000
+
+dataset:
+  data_dir: "data/tinystoriesv2_shuffled"
+  dataset_name: "tinystoriesv2"
+
+# Step 3–4: will be populated by step 1 — 40k prompts from the new prompt split.
+sft:
+  prompt_data: "data/prompt_data/gpt-5-nano-2025-08-07/docs_0000040000/gemini-3-pro-7/latent-generation/sft.jsonl"
+  # Tagged with batch.run_tag so runs from different batches don't collide.
+  # Step 3 writes {dataset_dir}/train.parquet; step 7 phase-B reads the same
+  # path. Bump run_tag + this dir together when starting a new experiment.
+  dataset_dir: "data/sft_dataset/latent_generation_40k_v1"
+  # With ~37k passing examples (92% of 40k) instead of ~9k, the model has
+  # 4× the reps to internalize the exact word-count objective. Keeping
+  # epochs=4 gives a comparable total-data budget to the past 10k×8ep runs
+  # while gaining a lot more unique examples.
+  epochs: 4
+  micro_batch_size_per_gpu: 16   # H200 has headroom; 16 keeps grad_accum=4
+  train_batch_size: 64
+  lr: 1.0e-5
+
+# Step 5: vLLM rollout off the trained SFT checkpoint. Trainer.save_model()
+# writes the final model to checkpoint_dir root, so we point at the dir.
+generation:
+  model_path: "checkpoints/sft"
+  chunks: [0]
+  max_tokens: 128   # response is ~80 tokens; shrinks vLLM KV reservation
+
+# Step 6: small dense decoder (~40M params); easily fits 512-batch on one H200.
+c2f_training:
+  init_from: "random"
+  fsdp: ""
+  hidden_size: 512
+  intermediate_size: 2048
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  num_hidden_layers: 8
+  mask_type: "block"
+  checkpoint_dir: "checkpoints/decoder"
+  tokenizer_dir: "checkpoints/tokenizer"
+  per_device_batch_size: 512
+  eval_batch_size: 2048
+  gradient_accumulation_steps: 1
+
+# Step 6b: architecture matched to c2f_training for fair nats/word comparison.
+ar_training:
+  fsdp: ""
+  hidden_size: 512
+  intermediate_size: 2048
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  num_hidden_layers: 8
+  checkpoint_dir: "checkpoints/ar_baseline"
+  per_device_batch_size: 512
+  eval_batch_size: 2048
+  gradient_accumulation_steps: 1
+
+# Step 6c: architecture matched; [UNK] from c2f tokenizer is MASK index.
+diffusion_training:
+  fsdp: ""
+  hidden_size: 512
+  intermediate_size: 2048
+  num_attention_heads: 8
+  num_key_value_heads: 8
+  head_dim: 64
+  num_hidden_layers: 8
+  checkpoint_dir: "checkpoints/diffusion_baseline"
+  per_device_batch_size: 512
+  eval_batch_size: 2048
+  gradient_accumulation_steps: 1
+
+# Step 7: RL. Defaults are fine for the sft_rl phase on 1 H200.
+# For multi-GPU joint, override num_gpus at launch and pick a TP/DP split
+# that doesn't need the vllm/verl DP patches (TP=num_gpus, DP=1 works out of
+# the box; DP>1 needs patches/*.patch).
+rl:
+  sft_rl:
+    model_path: "checkpoints/sft"
+  c2f_finetune:
+    model_path: "checkpoints/decoder"
+  joint:
+    model_path: "checkpoints/sft"
+    c2f_model_path: "checkpoints/decoder"
+    c2f_mask_type: "block"
+    c2f_lr: 1.0e-4
+    train_batch_size: 256
+    # 256k prompts × 3 epochs / 256 batch = 3,000 steps → matches past
+    # 64k×12ep compute budget but with 4× more unique prompts and 24
+    # (vs 96) visits per prompt. More-diverse gradient signal.
+    epochs: 3
+    ppo_micro_batch_size_per_gpu: 32
+    c2f_micro_batch_size: 128

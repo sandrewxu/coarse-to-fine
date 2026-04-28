@@ -2,12 +2,23 @@
 """
 Verify batch API outputs and write veRL-compatible SFT parquet.
 
+Output layout:
+    {sft.dataset_dir}/train.parquet          # SFT training data (step 4)
+    {dataset.output_dir}/{run_tag}/verification_stats.json
+
+To keep parquets from different batch runs side-by-side, set
+``sft.dataset_dir`` in your YAML to include the run tag, e.g.::
+
+    sft:
+      dataset_dir: "data/sft_dataset/latent_generation_40k_v1"
+
+Step 3 aborts if ``train.parquet`` already exists unless ``--force``.
+
 Usage:
     python scripts/03_verify_outputs.py \
         --input data/batch_outputs/.../output.jsonl \
-        --config config/latent_generation.yaml \
-        --prompts data/prompt_data/.../sft.jsonl \
-        --output data/verified/latent_generation_10k_v1
+        --config config/H200.yaml \
+        --prompts data/prompt_data/.../sft.jsonl
 """
 
 import argparse
@@ -87,7 +98,22 @@ def main():
         "--prompts", type=Path, default=None, help="sft.jsonl with original prompts"
     )
     parser.add_argument(
-        "--output", type=Path, default=None, help="Output dir for verification stats"
+        "--output",
+        type=Path,
+        default=None,
+        help="Stats dir override (default: {dataset.output_dir}/{run_tag})",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="SFT parquet dir override (default: {sft.dataset_dir}). "
+        "File written inside as train.parquet.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing train.parquet. Without this, the script aborts on collision.",
     )
     args = parser.parse_args()
 
@@ -100,14 +126,35 @@ def main():
     word_count_constraints = config["word_count_constraints"]
     strict = config.get("verification", {}).get("strict_word_count", True)
     provider = config.get("batch", {}).get("provider", "openai")
+    run_tag = config.get("batch", {}).get("run_tag", "default")
 
     if provider != "openai":
         log.error("Unsupported provider %r. Only 'openai' is supported.", provider)
         sys.exit(1)
 
-    output_dir = Path(
-        args.output or config.get("dataset", {}).get("output_dir", "data/verified/output")
+    # Stats dir: explicit override or {dataset.output_dir}/{run_tag}.
+    if args.output is not None:
+        output_dir = args.output
+    else:
+        base = Path(config.get("dataset", {}).get("output_dir", "data/verified"))
+        output_dir = base / run_tag
+
+    # Resolve the SFT parquet target and fail fast on unintended overwrites.
+    sft_base = args.output_dir or Path(config.get("sft", {}).get("dataset_dir", "data/sft_dataset"))
+    sft_output = (
+        sft_base
+        if Path(sft_base).is_absolute()
+        else Path(__file__).resolve().parent.parent / sft_base
     )
+    target_parquet = sft_output / "train.parquet"
+    if target_parquet.exists() and not args.force:
+        log.error(
+            "Refusing to overwrite existing parquet: %s\n"
+            "  Pass --force to overwrite, --output-dir to write elsewhere, or bump "
+            "sft.dataset_dir / batch.run_tag in your YAML.",
+            target_parquet,
+        )
+        sys.exit(1)
 
     # Load prompts
     prompts_path = args.prompts
@@ -174,20 +221,13 @@ def main():
         log.error("No outputs passed verification.")
         sys.exit(1)
 
-    # Save SFT dataset
-    sft_dir = config.get("sft", {}).get("dataset_dir", "data/sft_dataset")
-    sft_output = (
-        Path(sft_dir)
-        if Path(sft_dir).is_absolute()
-        else Path(__file__).resolve().parent.parent / sft_dir
-    )
+    # Save SFT dataset (path already resolved + existence-checked above)
     log.info(f"Creating SFT parquet from {stats.passed} verified outputs...")
     dataset, saved_path = create_and_save_dataset(
         verified_results=results,
         output_dir=sft_output,
         prompts_by_id=prompts_by_id,
     )
-    log.info(f"  Saved to: {saved_path} ({len(dataset)} examples)")
 
     # Save stats
     stats_path = output_dir / "verification_stats.json"
@@ -204,8 +244,13 @@ def main():
             f,
             indent=2,
         )
-    log.info(f"  Stats saved to: {stats_path}")
-    log.info("\nDone!")
+
+    log.info("")
+    log.info("=" * 60)
+    log.info(f"SFT parquet:  {saved_path}  ({len(dataset)} examples)")
+    log.info(f"Stats:        {stats_path}")
+    log.info("=" * 60)
+    log.info("Next: python scripts/04_sft_train.py --data %s --config %s", saved_path, args.config)
 
 
 if __name__ == "__main__":
